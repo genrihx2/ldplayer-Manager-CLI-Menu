@@ -1,0 +1,41 @@
+name: Code Scanning (PSScriptAnalyzer)
+
+# CodeQL does not support PowerShell, so code scanning is fed by
+# PSScriptAnalyzer results converted to SARIF. This fills the
+# Security -> Code scanning alerts tab with real findings instead of
+# "No CodeQL supported languages to scan".
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'   # weekly refresh, Mondays 06:00 UTC
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+
+      - name: Generate SARIF
+        shell: pwsh
+        run: ./scripts/Build-Sarif.ps1 -OutputPath results.sarif
+
+      - name: Upload to Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
+          wait-for-processing: true
