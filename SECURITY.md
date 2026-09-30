@@ -32,3 +32,40 @@
 ## Сроки реакции
 
 Первый ответ — в течение 7 дней. Обновление статуса — по мере работы над исправлением. После выпуска исправления публикуется релиз и, при необходимости, Security Advisory с указанием затронутых версий.
+
+---
+
+# Security Policy (English)
+
+## Supported Versions
+
+| Version | Supported |
+| ------- | --------- |
+| 2.0.x   | ✅ Supported |
+| < 2.0   | ❌ Not supported — please update to the latest release |
+
+## Reporting a Vulnerability
+
+Please do **not** report vulnerabilities in public Issues.
+
+1. Preferred: **Private vulnerability reporting** — Security → Report a vulnerability in this repository.
+2. If unavailable, contact the repository owner directly.
+
+When reporting, please include: LDManager version (menu `[v]` / Version info), Windows version, reproduction steps, and expected vs actual behavior.
+
+## What counts as a vulnerability in this project
+
+- Leakage or decryption of the GitHub token / `SIEVE_API_KEY` stored DPAPI-encrypted in `LDManager.config.json`.
+- Arbitrary command execution in the user's context without explicit user actions in the menu.
+- MITM substitution of files downloaded by self-update: the script only fetches from `raw.githubusercontent.com` / `github.com` over HTTPS.
+- Any covert network connections: there should be none — traffic goes only to `api.github.com`, `raw.githubusercontent.com`, `github.com`, and `scrape.usesieve.com`, and only on explicit user actions.
+
+## Out of scope
+
+- Behavior of the LDPlayer emulator itself (report to LDPlayer developers).
+- Social engineering against the user (convincing them to click something).
+- Automated scanner reports without a real exploitation scenario.
+
+## Response timeline
+
+First response within 7 days. Status updates as the fix progresses. Once a fix ships, a release is published and, if warranted, a Security Advisory listing affected versions.
