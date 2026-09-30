@@ -491,6 +491,26 @@ function Get-LDInstanceIdentity {
             }
         }
     }
+
+    # 2) JSON-конфиг LDPlayer 14
+    $jsonPath = Join-Path $base "vms\config\leidian$Index.config"
+    if (Test-Path $jsonPath) {
+        try {
+            $j = Get-Content $jsonPath -Raw | ConvertFrom-Json
+            return [pscustomobject]@{
+                Ini          = $jsonPath
+                Imei         = $j.'propertySettings.phoneIMEI'
+                Imsi         = $j.'propertySettings.phoneIMSI'
+                SimSerial    = $j.'propertySettings.phoneSimSerial'
+                AndroidId    = $j.'propertySettings.phoneAndroidId'
+                Mac          = $j.'propertySettings.macAddress'
+                Manufacturer = $j.'propertySettings.phoneManufacturer'
+                Model        = $j.'propertySettings.phoneModel'
+                PhoneNumber  = $j.'propertySettings.phoneNumber'
+            }
+        } catch { }
+    }
+
     return $null
 }
 
