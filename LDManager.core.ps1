@@ -586,6 +586,63 @@ function Get-AdbPortFromConfig {
     return $null
 }
 
+function Get-AdbDebugState {
+    # Признак включённой ADB-отладки инстанса из JSON-конфига LDPlayer 14
+    # (basicSettings.adbDebug: 0/пусто = выкл, 1/2 = вкл). $null - конфиг не найден.
+    param([int]$Index)
+    if (-not $script:LdPath) { return $null }
+    $base = Split-Path $script:LdPath -Parent
+    $cfg = Join-Path $base "vms\config\leidian$Index.config"
+    if (Test-Path $cfg) {
+        try {
+            $j = Get-Content $cfg -Raw | ConvertFrom-Json
+            $prop = $j.PSObject.Properties['basicSettings.adbDebug']
+            if ($prop -and $prop.Value) { return ([int]$prop.Value -ne 0) }
+            return $false
+        } catch { }
+    }
+    return $null
+}
+
+function Enable-LDAdb {
+    # Включает ADB-отладку инстанса правкой JSON-конфига LDPlayer 14:
+    # добавить/обновить basicSettings.adbDebug = 2. Если инстанс запущен -
+    # предлагает остановить, поправить и запустить снова.
+    param([object]$Instance)
+    if (Get-AdbDebugState -Index $Instance.Index) {
+        Write-Ok "ADB-отладка уже включена в конфиге инстанса $($Instance.Index)."
+        return $true
+    }
+    $wasRunning = $Instance.Running
+    if ($wasRunning) {
+        if (-not (Confirm-Action "ADB-отладка выключена. Остановить инстанс, включить и запустить снова?")) {
+            Write-Note 'Отменено.'
+            return $false
+        }
+        [void](Invoke-LDConsole -Arguments @('quit','--index',[string]$Instance.Index))
+        Start-Sleep -Seconds 10
+    }
+    $base = Split-Path $script:LdPath -Parent
+    $cfg = Join-Path $base "vms\config\leidian$($Instance.Index).config"
+    if (-not (Test-Path $cfg)) { Write-Fail "Конфиг не найден: $cfg"; return $false }
+    try {
+        $j = Get-Content $cfg -Raw | ConvertFrom-Json
+        $j | Add-Member -Force -NotePropertyName 'basicSettings.adbDebug' -NotePropertyValue 2
+        $j | ConvertTo-Json -Depth 10 | Set-Content $cfg -Encoding UTF8
+        Write-Ok 'ADB-отладка включена в конфиге (basicSettings.adbDebug = 2).'
+        if ($wasRunning) {
+            [void](Invoke-LDConsole -Arguments @('launch','--index',[string]$Instance.Index))
+            Write-Note 'Инстанс запускается заново - подождите полной загрузки Android.'
+        } else {
+            Write-Note 'Запустите инстанс - ADB-порт появится после загрузки Android.'
+        }
+        return $true
+    } catch {
+        Write-Fail "Не удалось изменить конфиг: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Connect-AdbTarget {
     # Пробует adb connect и подтверждает результат через 'adb devices'.
     # Если инстанс виден как offline (ADB-рукопожатие не завершилось) — перезапускает
@@ -657,6 +714,22 @@ function Resolve-AdbTarget {
     if ($cfgPort) { $candidates.Add($cfgPort) }
     $candidates.Add(5555 + (2 * $Index))   # формула 5555 + index*2
     $candidates.Add(5554 + (2 * $Index))   # вариант 5554 + index*2
+
+    # Если ADB-отладка выключена в конфиге инстанса - порты и не появятся:
+    # предложим включить её прямо здесь (правка JSON-конфига + перезапуск).
+    if ((Get-AdbDebugState -Index $Index) -eq $false) {
+        Write-Note 'ADB-отладка выключена в настройках этого инстанса.'
+        if (Confirm-Action 'Включить ADB-отладку сейчас (правка конфига + перезапуск инстанса)?') {
+            $fakeInst = [pscustomobject]@{ Index = $Index; Name = $Name; Running = $false }
+            if (Enable-LDAdb -Instance $fakeInst) {
+                Write-Note 'Запустите инстанс и повторите ADB-операцию после загрузки Android.'
+                Wait-Enter
+                return $null
+            }
+        } else {
+            Write-Note 'Включите «Отладка по ADB» в LDPlayer: Настройки -> Другие настройки.'
+        }
+    }
 
     foreach ($p in $candidates) {
         if (-not (Test-TcpPortOpen -Port $p)) { continue }
@@ -2679,8 +2752,8 @@ try {
 # SIG # Begin signature block
 # MIIb5gYJKoZIhvcNAQcCoIIb1zCCG9MCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUy1JLlOHIlEw+HMrQrZbtKQJQ
-# i2OgghZQMIIDEjCCAfqgAwIBAgIQHb8OO1X7MrdClKYHA5HxWzANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUOb5bDFtK9LQ+QNEzHHhMVphg
+# DJagghZQMIIDEjCCAfqgAwIBAgIQHb8OO1X7MrdClKYHA5HxWzANBgkqhkiG9w0B
 # AQsFADAhMR8wHQYDVQQDDBZMRE1hbmFnZXIgQ29kZSBTaWduaW5nMB4XDTI2MDkz
 # MDExNDMzNFoXDTI5MDkzMDExNTMzNFowITEfMB0GA1UEAwwWTERNYW5hZ2VyIENv
 # ZGUgU2lnbmluZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKaLCNs9
@@ -2802,28 +2875,28 @@ try {
 # zJZA9P2DMYIFADCCBPwCAQEwNTAhMR8wHQYDVQQDDBZMRE1hbmFnZXIgQ29kZSBT
 # aWduaW5nAhAdvw47Vfsyt0KUpgcDkfFbMAkGBSsOAwIaBQCgeDAYBgorBgEEAYI3
 # AgEMMQowCKACgAChAoAAMBkGCSqGSIb3DQEJAzEMBgorBgEEAYI3AgEEMBwGCisG
-# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMCMGCSqGSIb3DQEJBDEWBBRE86yWr3My
-# NOKU+Qb0O/mlANIiuDANBgkqhkiG9w0BAQEFAASCAQCboTEXEWdD1z1fpQ+3fDYn
-# SOBuD0i87lwOeDyWQwCDfnW2Y5jzLnAway6y6pdFHs4Rz4ASEhRxVU0InhI1SkQO
-# sLhzdMwQBWW16QipU7tmscOia7L5Jh9eioCrYxZpj7tA/W+i0seEDmch81ls998M
-# +/szQATWiJNMCfleYmgoYNCyKnVAQ51R06kKh5qVYSClRq2r+8iq3IKwpwNzXhtG
-# qxe5yMg1gXYRzCf0CMTu6xq0H2bwxS2HCSCqYPwCr/Tj9VB1WknsBO7bdAXcZgyK
-# yN4f3CFhdus2kRpG2HH8pRHfRPnpYUSM5t0qc458wda59ZEu7FB4TtG5DwCver1k
+# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMCMGCSqGSIb3DQEJBDEWBBQc1NOYo9aK
+# InFHwAmamzwqM7nrDTANBgkqhkiG9w0BAQEFAASCAQB+o0zYoQHnrME8QOLDr3y5
+# klNEHz6yEBjh15nY//GktmwEyX8JU3vjk1hHVdGyVlhUnW6x2L/y6QFReZlOZ5jm
+# S4dhtLnuNgZ2Gv4KBvlyDMnooH2ajq/pe6cJui8I73Cx1Ep8waJr5y88Wi2SFfu8
+# l7OqioYGW+BOXaZF5GN9g+oR25rJTTtqUd4eyqEMyRJOzQgqzQLP0rpt3cObqW7W
+# PtpZell5i42nEb4h+v6WLyjJb2fg4gjsgKqmr97rcxZuI1C2R78GC1Sy+/w4m5kE
+# OHyI/FUYtOZmKmYG4t1J50BsClycw2yyJxFiC6NuoRpmnQH+H6v8tEHSS1dIBIq9
 # oYIDJjCCAyIGCSqGSIb3DQEJBjGCAxMwggMPAgEBMH0waTELMAkGA1UEBhMCVVMx
 # FzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMUEwPwYDVQQDEzhEaWdpQ2VydCBUcnVz
 # dGVkIEc0IFRpbWVTdGFtcGluZyBSU0E0MDk2IFNIQTI1NiAyMDI1IENBMQIQCE/c
 # M09+RU7bww+P+ZIYNTANBglghkgBZQMEAgEFAKBpMBgGCSqGSIb3DQEJAzELBgkq
-# hkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2MDkzMDEzMTEyNFowLwYJKoZIhvcN
-# AQkEMSIEIDlBHdeeXiucBV7VuL5kbqKcaKCfWGmVyxnA10vBtklCMA0GCSqGSIb3
-# DQEBAQUABIICAGC19yqIBr3p10lOpOQaCOAks2vpEzJoopfx6AArvDg6HsTsc/9L
-# TJ275q3bUVE3HJx6Q6wfUh9C8UgKG3vcSt16fxdeuklaOzDdnJ8OY8cAq0Kevpvi
-# ivwEXLC02HfVUQ16sk5PkrOHiHBjUw4/jsT/L0Dd8kENt0gGx0Pdq49vm/E8qceo
-# G+C+jG4+LKhcIo0uAOe/7oAe3+dtoJ7jwjctqkFSnCsO4l5f+laNmlbdlJzpHhX0
-# I4Doy7C3uyCQZ+uTgOYXVcnX6PCYXNZbjwP6AzC37hHkdjw4hwI3PR8z2Jqrp9p7
-# AS+i5xpoI/A4IHhegusYVer9MMX+5OvA3qvzYUp4vrlYoQoZrX+jxzFyJXcOR26d
-# AbXNs7HqccR5ZvOuQwDuWCyhPVPOLOZ4QRS4pLQJ/+SqjTk+Ji0Ju0pYEEzBof9f
-# ZbYZjdwNdUgO9RCklAWDQXWi7X+YqYxpIpZuT06zcDsPly+SDgr1VsZ4hsrZc02C
-# zSLyty0/oMqztG/78axCh3G6Qg7/fIwFQEbFv26e3bl5cOXTrhHPlmc85WpMhd72
-# ECgtQal4DbLPH4Hc9Lm2AAwkW+LHQDNqZTRmv92PJbkAM73pCrD/Ctc6Anm8VwS4
-# wYhi3GD+VEmFt7VqNdi0++0L+MjdIlV3tcJ3WYXObo3mVvtMZEm3yBWn
+# hkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2MDkzMDE0NDE0MlowLwYJKoZIhvcN
+# AQkEMSIEIFwX44VplVcsZQ1VtDVmIYTHxOfvPPkelnDSFg4hVOJyMA0GCSqGSIb3
+# DQEBAQUABIICACckoBp9UP+uWnbtv7V7IqAYAc6j8o9TIGfkISamPuoYYSL091t4
+# 0mj4lhX5apA00PpggMsgWSaV/nczADjdjCkBB2usGdtLfxIsGAARdGLu4f0EEncQ
+# AV3r55+8eUmYzUgOI7uw2Ic05lXjwlEeDO6M3IPLoVFPHMbtEnqeNgupfGB1dg5t
+# ow5Zoj+HEaZuIK4pUboI7EEnfYD7rj8i0oeabgMjUJGNtrvtca0tHGRqXSTpQVEL
+# mcIKEn20UoDn4UEDRHhGpfydgj15Z+BS33FDGCH4HrMuOa67K0pc0CWARrnznFHh
+# t7fB9Oi8EA89By6+AKOncPqvCA7Jg6Oqsr2E4LxKc79FRAgSZ7lv+F6cjsEcGih7
+# /B2res7z8Cw6Dg3wTaXgpjy7PVJ7XqOZkjliPvo/ZerJEIJXrz7ClfJgq3MSSvF1
+# ZJgxc98d9RhGxa55ELUwJOZ+Rx+FORngiaUa6KQhB4OnpcV1ILu3vvc2Bpp5mMUy
+# 8AR9xGcBOEQVF64UsK63AQf6k5yncPXZKSMKrUNlledBXJyMeaMduSsozVWjxxe3
+# oV6imHbwuXmu5zjclOjlIUKvPjyBmVQRStu0SxNJS3nFKF1bWHSShoMED4992WuG
+# WF9BBUbIBRPiNlK5rg6T1GfFsCHSXM7En0cAfqu0JH+wjIqCAhKdbeql
 # SIG # End signature block
