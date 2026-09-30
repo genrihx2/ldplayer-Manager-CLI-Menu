@@ -658,6 +658,13 @@ function Connect-AdbTarget {
         $dev = Invoke-Adb -Arguments @('devices')
         if ($dev -and $dev -match $pattern) { return $target }
 
+        # LDPlayer-инстансы adb часто саморегистрирует как emulator-<порт-1>
+        # (5557 -> emulator-5556). Если такой serial в статусе device - он и есть
+        # наш инстанс, считаем подключение успешным.
+        $emu = 'emulator-' + ($Port - 1)
+        $emuPattern = [regex]::Escape($emu) + '\s+device'
+        if ($dev -and $dev -match $emuPattern) { return $target }
+
         if ($dev -match [regex]::Escape($target) + '\s+offline') {
             Write-Note 'Инстанс виден как offline — перезапускаю adb-сервер и пробую снова...'
             [void](Invoke-Adb -Arguments @('kill-server'))
@@ -2758,8 +2765,8 @@ try {
 # SIG # Begin signature block
 # MIIb5gYJKoZIhvcNAQcCoIIb1zCCG9MCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUozBd4fn9ktCxcipk+ybaYSfB
-# 4RCgghZQMIIDEjCCAfqgAwIBAgIQHb8OO1X7MrdClKYHA5HxWzANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUPpU7Eh8Wlhxb29fH3QO4c0Re
+# r4mgghZQMIIDEjCCAfqgAwIBAgIQHb8OO1X7MrdClKYHA5HxWzANBgkqhkiG9w0B
 # AQsFADAhMR8wHQYDVQQDDBZMRE1hbmFnZXIgQ29kZSBTaWduaW5nMB4XDTI2MDkz
 # MDExNDMzNFoXDTI5MDkzMDExNTMzNFowITEfMB0GA1UEAwwWTERNYW5hZ2VyIENv
 # ZGUgU2lnbmluZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKaLCNs9
@@ -2881,28 +2888,28 @@ try {
 # zJZA9P2DMYIFADCCBPwCAQEwNTAhMR8wHQYDVQQDDBZMRE1hbmFnZXIgQ29kZSBT
 # aWduaW5nAhAdvw47Vfsyt0KUpgcDkfFbMAkGBSsOAwIaBQCgeDAYBgorBgEEAYI3
 # AgEMMQowCKACgAChAoAAMBkGCSqGSIb3DQEJAzEMBgorBgEEAYI3AgEEMBwGCisG
-# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMCMGCSqGSIb3DQEJBDEWBBTiET3QLdIc
-# U4aM2AbGLQprISANSzANBgkqhkiG9w0BAQEFAASCAQA2RKN5wnc8KgIUs+HVPiNE
-# qlPzHldlSaFMSV9F0Vkn4cLuAU+kcxhhU5qcaiiAc44prAT6E94CMw9hG3UVYHt4
-# fYgjhEGHqufpmnVJjGRi7pT2PcYMsEytSG9Comul06aIgH/R48s8OF0tkGLmzHnA
-# 7SEungxMSvWauyhPUZMzqD116gAO9ZX4V/a7z4PPRXt8BYqKsuLguyngGc2Dxl76
-# Z8sIxdafUaK+wG10ypeUW/su7Ap0B1zI0keNDndl1gfFQW++6KxYHjllCAzNsChA
-# MlZfMuRWrvBMN8JUpPSKxZ7cY+ObG/zGFuGoMuAAVNQu1pcT7Timh1Thh00EcKmY
+# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMCMGCSqGSIb3DQEJBDEWBBRgu4f0b269
+# IdzRIIGC8prlrs655TANBgkqhkiG9w0BAQEFAASCAQBz04r0M7mRk6ngmZvrxacN
+# B6pEkimgwFA0Q+naNSaDIqlCdQ12WMUY+uc9cXCb5LFv9YGml9hrMgBpMhlf4VXX
+# nqUhvM9kB21lubSx5OnoXeF2xef0Qy5JF4WjKRW7x6RWZY3c9iJ2Ni2Q1hf3H559
+# vYrDNb1W1bWGwCf44HcrmT5Cw+tV0GRL+Z7Hlx+kf8C1jzxMWm2h77IenkrkXqZ+
+# zBKfkiwURygxlrKPgNrBlSDYP+jAfebKfzSYNZWdMzYYbnkqZWXD/EMGWCqCQ+cK
+# BHN2YhAZij1Uqx3/Oio/QykKXRy52D/+xoiNcoKcOHzbWLCj/cYGqJ7mX7OG24it
 # oYIDJjCCAyIGCSqGSIb3DQEJBjGCAxMwggMPAgEBMH0waTELMAkGA1UEBhMCVVMx
 # FzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMUEwPwYDVQQDEzhEaWdpQ2VydCBUcnVz
 # dGVkIEc0IFRpbWVTdGFtcGluZyBSU0E0MDk2IFNIQTI1NiAyMDI1IENBMQIQCE/c
 # M09+RU7bww+P+ZIYNTANBglghkgBZQMEAgEFAKBpMBgGCSqGSIb3DQEJAzELBgkq
-# hkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2MDkzMDE1NTYwN1owLwYJKoZIhvcN
-# AQkEMSIEIP5/5Q/IRquu4pBnQq+Z/dJgzC4YPnREdRyggeNxnFRhMA0GCSqGSIb3
-# DQEBAQUABIICAASjOu75flFuMXC8/MXFGBbhE+BRY0WptyH3hwMpKXbUEUMMejRE
-# BPFV9Ph+fvRI3eH3XsM0qt9WFewJiaEah9gigOv+5+cVMynE5skuBefadaCgGLb3
-# cLUjWMaEnFDXVK8NZlwogKXn+D6XrIl/lZRWkDoqlyQzdFVfE/CkZg6NLKEgwaBC
-# 1Mrg+295G2mG7DTUUbeKBQj8CfiCfm0vZusmAy2m2IrKd4+lrqD5v+cxvga/90m8
-# JrJ6FTv75/3m5kLL/8KYY7O7o0alifQ99ZVLvgHmoedkW8+vOsJlbKOokoC0Wc08
-# RRsXoxCpT8QMoHeVy3VVnsH4G5bfmnDsZuZGREHqDD4vGPcCVmCNeYySCDulkSKt
-# Gwb+JPRRwca3iy1VuD5t0zgel1KXS/OI9pmTZPLJE47YvsDIXsM2227BlqzQ95ff
-# yLp7N+p51g2b975je3HWjOapQygWADSrnkVX+bYzwfDmzqm/nP16Cngvh0bZ+889
-# RjQtyuIkWd56aYj4octg6AzgXlDRqliX52hHRiBAaeNWYNHYc3QzDEDxcL3fRa9P
-# yH7j4pjomSN7D5ViPpYwd6xuqwLvLeLNnJXbC/1LrIT0KR6CVf8x242sS6jDkDvx
-# AT8vHYTHziKSKighxCBbaN1b7BEdkqJHIQx4y2fpQxyj0YSft7/bCdee
+# hkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2MDkzMDE2MjAwOVowLwYJKoZIhvcN
+# AQkEMSIEIBWwGyJSbn/+D2p+7XV0DDaz6q6p57jXZoPv9Dx0V2yuMA0GCSqGSIb3
+# DQEBAQUABIICACJLX+69TXlsxqOJUUH2i4UBb2FgUBUlM9N7Plwk9qHaSsKInkJ5
+# EDluWfwZzzsBfASKA6swPv/xN/elKGOKQ+f6nbXIcQiD9OEGV97DWRjFxn1kjUVP
+# Ee2lxAM1iz4RjUCuYYb7CVOId9RFqV/I4t4PELpk1y+/K14CUITImgNXlNpOV6Un
+# thqa7Hg9pF+Yg6QVCHbnR9m4DVJI9zWHp5ap+ZjXk5VpPMdueONSDAG4ZCoJk9g+
+# eIbwbxG8wS8Tz9Fr9iEhUkl2Sl/dxkKZEpvwYo2h3/4I5YJ7subYGmPnFuUNafZa
+# HV2xiq9DF6vyQi91s0S4idDR+JQdi2WBPwS6Pg6Fs8nyDadX/l6aQdPViptdO6l7
+# dNGHVHJRs8jExR7pxLIsnoVlYP076RvLL0eQcxlt2zk/tXdPHRjSWsmP6FONVmF0
+# D4Mc8mDn7GbneJQ0s1tAt608rPnnx+NiLI2rKv4NznWY7R5hwpx9GGupXO0Bd2bC
+# l3gH469HcqJNjdRcEQukwdmYHdq354YBym5lYXtJhDufVkTZadaLR/pGPwZeY4KY
+# flGAVKvrBHS2D1FwsHpcH1VcvZ2wDdBpjHKI2cZqi3z4SNZw/QhzuV8bs0VdZVjW
+# hFshh/xhnJY+qSaAq/k6QNOkvqeLd5ZI3xVjRP92Ihql4gUm6dlx+jZw
 # SIG # End signature block
