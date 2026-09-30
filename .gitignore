@@ -1,0 +1,17 @@
+# Конфиг с локальными путями и зашифрованными (DPAPI) токенами
+LDManager.config.json
+LDManager.config.*.json
+
+# Резервные копии, создаваемые автообновлением
+LDManager.backup_*.ps1
+
+# Папки результатов скрейпинга Sieve
+sieve-*/
+
+# Папки клонов/распаковок репозитория
+ldplayer-Manager-CLI-Menu-clone/
+ldplayer-Manager-CLI-Menu-*/
+*.zip
+
+# Мусор PowerShell
+*.tmp
