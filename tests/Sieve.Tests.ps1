@@ -8,7 +8,7 @@ BeforeAll {
     $env:SIEVE_API_KEY = 'dc_sk_TEST'
 
     function New-SieveFakeResponse {
-        param($Content, [int]$StatusCode = 200, [bool]$Ok = $true, [string]$RetryAfter = $null, [string]$Error = $null)
+        param($Content, [int]$StatusCode = 200, [bool]$Ok = $true, [string]$RetryAfter = $null, [string]$ErrorText = $null)
         return [pscustomobject]@{ Ok = $Ok; StatusCode = $StatusCode; Content = $Content; Raw = $null; RetryAfter = $RetryAfter; Error = $Error }
     }
 }
@@ -117,7 +117,7 @@ Describe 'Sieve: дозапрос (follow-up) и проверка хода' {
     It 'при 409 ждёт и повторяет тот же запрос' {
         $script:queue = @(
             (New-SieveFakeResponse -Content ([pscustomobject]@{ status = 'running'; turns = 0 })),
-            (New-SieveFakeResponse -Ok $false -StatusCode 409 -Error 'HTTP 409'),
+            (New-SieveFakeResponse -Ok $false -StatusCode 409 -ErrorText 'HTTP 409'),
             (New-SieveFakeResponse -Content ([pscustomobject]@{ status = 'running' })),
             (New-SieveFakeResponse -Content ([pscustomobject]@{ status = 'done'; turns = 1 }))
         )
@@ -148,7 +148,7 @@ Describe 'Sieve: маппинг ошибок' {
 Describe 'Sieve: старт запуска и безопасные повторы' {
     It 'НЕ повторяет POST при таймауте/сетевой ошибке (запуск мог создаться)' {
         Mock Save-SieveRunRecord { }
-        Mock Invoke-SieveHttp { New-SieveFakeResponse -Ok $false -StatusCode 0 -Error 'timeout' }
+        Mock Invoke-SieveHttp { New-SieveFakeResponse -Ok $false -StatusCode 0 -ErrorText 'timeout' }
         $r = Start-SieveScrapeRun -Instruction 'test' -Sleep { param($s) }
         $r | Should -BeNullOrEmpty
         Should -Invoke Invoke-SieveHttp -Times 1 -Exactly
@@ -156,7 +156,7 @@ Describe 'Sieve: старт запуска и безопасные повтор�
 
     It 'повторяет POST после 429 и сохраняет session_id до возврата' {
         $script:queue = @(
-            (New-SieveFakeResponse -Ok $false -StatusCode 429 -RetryAfter '0' -Error 'HTTP 429'),
+            (New-SieveFakeResponse -Ok $false -StatusCode 429 -RetryAfter '0' -ErrorText 'HTTP 429'),
             (New-SieveFakeResponse -StatusCode 202 -Content ([pscustomobject]@{ status = 'queued'; session_id = 'sess-1'; poll = '/api/scrapes/sess-1' }))
         )
         Mock Invoke-SieveHttp {
@@ -174,7 +174,7 @@ Describe 'Sieve: старт запуска и безопасные повтор�
     }
 
     It 'не повторяет POST при 400/401/402 (исправляем запрос)' {
-        Mock Invoke-SieveHttp { New-SieveFakeResponse -Ok $false -StatusCode 400 -Error 'HTTP 400' }
+        Mock Invoke-SieveHttp { New-SieveFakeResponse -Ok $false -StatusCode 400 -ErrorText 'HTTP 400' }
         Mock Save-SieveRunRecord { }
         $r = Start-SieveScrapeRun -Instruction 'test' -Sleep { param($s) }
         $r | Should -BeNullOrEmpty

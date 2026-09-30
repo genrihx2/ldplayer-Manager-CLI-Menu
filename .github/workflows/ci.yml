@@ -1,0 +1,49 @@
+name: CI
+
+# PSScriptAnalyzer (линтер) + Pester (тесты) на каждый push в main
+# и на каждый pull request.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $rules = @('PSAvoidUsingWriteHost', 'PSUseShouldProcessForStateChangingFunctions', 'PSAvoidUsingPlainTextForPassword', 'PSAvoidUsingConvertToSecureStringWithPlainText')
+          # Список исключений: интерактивное меню принципиально использует Write-Host,
+          # а ConvertFrom-SecureString (DPAPI) — осознанное решение проекта.
+          $settings = @{
+            ExcludeRules = $rules
+            Severity     = @('Error', 'Warning')
+          }
+          $results = Invoke-ScriptAnalyzer -Path . -Recurse -Settings $settings
+          $results | ForEach-Object {
+            "{0}:{1} {2} {3}" -f $_.ScriptName, $_.Line, $_.Severity, $_.Message
+          }
+          $errors = @($results | Where-Object Severity -eq 'Error')
+          if ($errors.Count -gt 0) {
+            Write-Host "::error::$($errors.Count) PSScriptAnalyzer error(s)"
+            exit 1
+          }
+
+      - name: Run Pester tests
+        shell: pwsh
+        run: |
+          Install-Module Pester -MinimumVersion 5.0 -Force -Scope CurrentUser
+          $config = New-PesterConfiguration
+          $config.Run.Path = './tests'
+          $config.Output.Verbosity = 'Normal'
+          Invoke-Pester -Configuration $config
