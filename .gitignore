@@ -4,6 +4,7 @@ LDManager.config.*.json
 
 # Резервные копии, создаваемые автообновлением
 LDManager.backup_*.ps1
+LDManager.backup_*/
 
 # Папки результатов скрейпинга Sieve
 sieve-*/
@@ -15,3 +16,8 @@ ldplayer-Manager-CLI-Menu-*/
 
 # Мусор PowerShell
 *.tmp
+
+# Файлы окружения: секреты хранятся в Infisical, а не на диске
+.env
+.env.*
+!.env.example

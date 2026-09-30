@@ -48,7 +48,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 # Версия и репозиторий
 # ---------------------------------------------------------------------------
-$script:ScriptVersion = '2.0.0'
+$script:ScriptVersion = '2.0.1'
 $script:RepoOwner   = 'genrihx2'
 $script:RepoName    = 'ldplayer-Manager-CLI-Menu'
 $script:RepoBranch  = 'main'
@@ -215,7 +215,12 @@ function Save-ManagerConfig {
 function Resolve-LDConsolePath {
     $cfg = Get-AppConfig
     if ($cfg -and $cfg.ldconsolePath -and (Test-Path $cfg.ldconsolePath)) {
-        return $cfg.ldconsolePath
+        # В старых конфигах мог сохраниться неверный путь (например, dnplayer.exe
+        # вместо ldconsole.exe) — проверяем имя файла, иначе берём ldconsole.exe
+        # из той же папки, а при неудаче ищем заново.
+        if ((Split-Path $cfg.ldconsolePath -Leaf) -ieq 'ldconsole.exe') { return $cfg.ldconsolePath }
+        $sibling = Join-Path (Split-Path $cfg.ldconsolePath -Parent) 'ldconsole.exe'
+        if (Test-Path $sibling) { return $sibling }
     }
 
     $candidates = New-Object System.Collections.Generic.List[string]
@@ -242,7 +247,18 @@ function Resolve-LDConsolePath {
                 Where-Object { $_.DisplayName -like '*LDPlayer*' -or $_.DisplayName -like '*Leidian*' }
         foreach ($a in $apps) {
             if ($a.InstallLocation) { $candidates.Add((Join-Path $a.InstallLocation 'ldconsole.exe')) }
-            if ($a.DisplayIcon)     { $candidates.Add(($a.DisplayIcon -replace ',\d+$','')) }
+            if ($a.DisplayIcon) {
+                $icon = ($a.DisplayIcon -replace ',\d+$','')
+                if ($icon -and (Test-Path $icon)) {
+                    # DisplayIcon часто указывает на dnplayer.exe (GUI), а не на ldconsole.exe:
+                    # ищем ldconsole.exe в той же папке.
+                    if ((Split-Path $icon -Leaf) -ieq 'ldconsole.exe') {
+                        $candidates.Add($icon)
+                    } else {
+                        $candidates.Add((Join-Path (Split-Path $icon -Parent) 'ldconsole.exe'))
+                    }
+                }
+            }
         }
     } catch { }
 
@@ -1936,12 +1952,16 @@ function Get-LatestReleaseInfo {
 }
 
 function Get-RemoteScriptVersion {
-    # Пытаемся взять версию из удалённого скрипта (строка $script:ScriptVersion = 'X.Y.Z')
-    $rawUrl = "https://raw.githubusercontent.com/$script:RepoOwner/$script:RepoName/$script:RepoBranch/LDManager.ps1"
-    try {
-        $head = (Invoke-WebRequest -Uri $rawUrl -Headers (Get-GithubHeaders) -TimeoutSec 20 -UseBasicParsing).Content
-        if ($head -match "\`$script:ScriptVersion\s*=\s*'([0-9\.]+)'") { return $matches[1] }
-    } catch { }
+    # Версия задаётся в LDManager.core.ps1 (строка $script:ScriptVersion = 'X.Y.Z'),
+    # поэтому читаем именно ядро, а не точку входа LDManager.ps1.
+    # Запасной вариант: старые копии репозитория держали версию в точке входа.
+    $base = "https://raw.githubusercontent.com/$script:RepoOwner/$script:RepoName/$script:RepoBranch/"
+    foreach ($f in @('LDManager.core.ps1', 'LDManager.ps1')) {
+        try {
+            $head = (Invoke-WebRequest -Uri ($base + $f) -Headers (Get-GithubHeaders) -TimeoutSec 20 -UseBasicParsing).Content
+            if ($head -match "\`$script:ScriptVersion\s*=\s*'([0-9\.]+)'") { return $matches[1] }
+        } catch { }
+    }
     return $null
 }
 
@@ -1956,7 +1976,7 @@ function Test-UpdateAvailable {
 }
 
 function Update-LDManagerSelf {
-    # Самообновление: скачивает LDManager.ps1 из репозитория и заменяет текущий файл
+    # Самообновление: скачивает все файлы скрипта из репозитория и заменяет их
     Write-Title 'Автообновление из GitHub'
     $check = Test-UpdateAvailable
     if ($check -eq $null) { Write-Fail 'Не удалось получить версию из GitHub (нет сети или репозиторий недоступен).'; Wait-Enter; return }
@@ -1966,17 +1986,27 @@ function Update-LDManagerSelf {
     Write-Host "  Доступна версия: $remote (у вас $script:ScriptVersion)"
     if (-not (Confirm-Action 'Скачать и заменить LDManager.ps1?')) { Write-Note 'Отменено.'; Wait-Enter; return }
 
-    $rawUrl = "https://raw.githubusercontent.com/$script:RepoOwner/$script:RepoName/$script:RepoBranch/LDManager.ps1"
-    $backup = "$scriptRoot\LDManager.backup_{0}.ps1" -f (Get-Date -Format 'yyyyMMdd_HHmmss')
+    $baseUrl = "https://raw.githubusercontent.com/$script:RepoOwner/$script:RepoName/$script:RepoBranch/"
+    $files   = @('LDManager.ps1', 'LDManager.core.ps1', 'LD.Sieve.ps1')
+    $backupDir = Join-Path $scriptRoot ("LDManager.backup_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
     try {
-        Copy-Item $PSCommandPath $backup -Force
-        $content = (Invoke-WebRequest -Uri $rawUrl -Headers (Get-GithubHeaders) -TimeoutSec 60 -UseBasicParsing).Content
-        [System.IO.File]::WriteAllText($PSCommandPath, $content, (New-Object System.Text.UTF8Encoding($true)))
-        Write-Ok "Обновлено до $remote. Резервная копия: $backup"
+        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+        foreach ($f in $files) {
+            $target = Join-Path $scriptRoot $f
+            if (Test-Path $target) { Copy-Item $target (Join-Path $backupDir $f) -Force }
+        }
+        foreach ($f in $files) {
+            $target = Join-Path $scriptRoot $f
+            $content = (Invoke-WebRequest -Uri ($baseUrl + $f) -Headers (Get-GithubHeaders) -TimeoutSec 60 -UseBasicParsing).Content
+            # Неизменённый файл не переписываем: сохраняем байты и подпись.
+            if ((Test-Path $target) -and ([System.IO.File]::ReadAllText($target) -ceq $content)) { continue }
+            [System.IO.File]::WriteAllText($target, $content, (New-Object System.Text.UTF8Encoding($true)))
+        }
+        Write-Ok "Обновлено до $remote. Резервная копия: $backupDir"
         Write-Note 'Перезапустите скрипт, чтобы изменения вступили в силу.'
     } catch {
         Write-Fail "Ошибка обновления: $($_.Exception.Message)"
-        if (Test-Path $backup) { Write-Note "Резервная копия: $backup" }
+        if (Test-Path $backupDir) { Write-Note "Резервная копия: $backupDir" }
     }
     Wait-Enter
 }
