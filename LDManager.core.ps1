@@ -1062,11 +1062,37 @@ function Set-LDCpuRam {
     Offer-Restart -Instance $inst
 }
 
+function Get-LDRootState {
+    # Читает фактическое состояние root из конфига инстанса (vms\config\leidianN.config).
+    # Возвращает $true/$false или $null, если конфиг не найден/не разобрался.
+    param([int]$Index)
+    if (-not $script:LdPath) { return $null }
+    $base = Split-Path $script:LdPath -Parent
+    $cfg = Join-Path $base "vms\config\leidian$Index.config"
+    if (Test-Path $cfg) {
+        try {
+            $json = Get-Content $cfg -Raw | ConvertFrom-Json
+            $prop = $json.PSObject.Properties['basicSettings.rootMode']
+            if ($prop) { return [bool]$prop.Value }
+        } catch { }
+    }
+    return $null
+}
+
 function Set-LDRoot {
     $inst = Select-LDInstance -Purpose 'root'
     if (-not $inst) { return }
     $on = Confirm-Action 'Включить root? (N = выключить)'
     Invoke-LDModify -Index $inst.Index -Props @{ root = $(if ($on) { '1' } else { '0' }) }
+
+    # Читаем состояние обратно из конфига - подтверждаем реальный результат,
+    # а не только «команда выполнена».
+    $state = Get-LDRootState -Index $inst.Index
+    if ($null -ne $state) {
+        if ($state -eq $on) { Write-Ok ("Проверено в конфиге инстанса: root {0}" -f $(if ($state) { 'ВКЛЮЧЁН' } else { 'ВЫКЛЮЧЕН' })) }
+        else { Write-Note 'Конфиг не отразил изменение - перезапустите окно LDPlayer и повторите.' }
+    }
+    Write-Note 'Переключатель в окне LDPlayer обновится после его закрытия/открытия; действует после запуска инстанса.'
     Offer-Restart -Instance $inst
 }
 
