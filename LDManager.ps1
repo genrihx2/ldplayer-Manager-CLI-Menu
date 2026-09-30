@@ -61,6 +61,8 @@ if ($script:RunMenu) {
     try {
         Initialize-LDManager
         Show-MainMenu
+        Write-Host ''
+        Write-Host 'LDManager завершён. Для нового запуска: powershell -ExecutionPolicy Bypass -File .\LDManager.ps1' -ForegroundColor Cyan
     } catch {
         Write-Host ''
         Write-Fail ("Критическая ошибка [{0}]: {1}" -f $_.Exception.GetType().Name, $_.Exception.Message)
@@ -68,6 +70,7 @@ if ($script:RunMenu) {
             Write-Host $_.InvocationInfo.PositionMessage -ForegroundColor DarkGray
         }
         if ($_.ScriptStackTrace) { Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray }
+        Write-Note 'Вы вернулись в консоль PowerShell — команды меню (q, 1, 2...) здесь не работают.'
         Wait-Enter
     }
 }
@@ -75,8 +78,8 @@ if ($script:RunMenu) {
 # SIG # Begin signature block
 # MIIb5gYJKoZIhvcNAQcCoIIb1zCCG9MCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUH6aJCzOkQjY0ZqdDBi6rWFgr
-# N5agghZQMIIDEjCCAfqgAwIBAgIQHb8OO1X7MrdClKYHA5HxWzANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUNPR2UqEmYPK9PbhpPptgZxWY
+# c1ugghZQMIIDEjCCAfqgAwIBAgIQHb8OO1X7MrdClKYHA5HxWzANBgkqhkiG9w0B
 # AQsFADAhMR8wHQYDVQQDDBZMRE1hbmFnZXIgQ29kZSBTaWduaW5nMB4XDTI2MDkz
 # MDExNDMzNFoXDTI5MDkzMDExNTMzNFowITEfMB0GA1UEAwwWTERNYW5hZ2VyIENv
 # ZGUgU2lnbmluZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKaLCNs9
@@ -198,28 +201,28 @@ if ($script:RunMenu) {
 # zJZA9P2DMYIFADCCBPwCAQEwNTAhMR8wHQYDVQQDDBZMRE1hbmFnZXIgQ29kZSBT
 # aWduaW5nAhAdvw47Vfsyt0KUpgcDkfFbMAkGBSsOAwIaBQCgeDAYBgorBgEEAYI3
 # AgEMMQowCKACgAChAoAAMBkGCSqGSIb3DQEJAzEMBgorBgEEAYI3AgEEMBwGCisG
-# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMCMGCSqGSIb3DQEJBDEWBBR7QmpfaKrA
-# aRkzgzUqGWaZ6QkMtjANBgkqhkiG9w0BAQEFAASCAQBKiDGwC1Qpp3N6hMKET5JJ
-# rnWksn9RaKF09f+6kwwfuC2BPt1121Ok40QnqKZhdpIlgwVifimjKwIVhhVenPuG
-# MiZ0NRRyNylAfO45loMMcVpV5alScydNoO+NJL/wHWdl6E/MkMraIeYtO9FYSSwT
-# JTsQ0fwYUg0OuqsyBO3MbaHrQBs1IjJrWpNy3i1r0VcxBxSmaAwzn8Ps4FZFSYuQ
-# 4JcoGh4iM94YgZWZ/NCebmHNghJLpqISX5T0pXizN2QbXfCfV+5KhvYVJXTrXH68
-# psuqvVeOBcAAJCT8X+nlGrDkCJVxhtpS81Idd4UewxWAa0DPX+k9RKCv7Si6wJV6
+# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMCMGCSqGSIb3DQEJBDEWBBTZ46BAXxdU
+# fyC3ymqocKG6OQnYkzANBgkqhkiG9w0BAQEFAASCAQApdVXeRHUHyHzbHf+XsdlN
+# t8O30kYh1lVpeoaK50L2Jqyi+LzMGqE4Ox8Nr92WbL0y4JoM3MaeX8JZpYv6MWNz
+# TOGRB1FgbO7jCPz5NR6SWguIdziyiJ8ccwF3Rnl63gSEnRVZSCU3eUYIeB4jKXlh
+# 2kjSF9tu6XziHco4P8qASmZ8QG2iW0g55jKZ2rZemLnsBjQoPWptOTBw49gWX51L
+# CWFPacGitCqoD0tpk3LBd4eGiiHGF78awByzi+LQ0UpQXAhm+0MfF7bFxVHqZq4g
+# 1XPNrixY6fVz6Y2+3eE7p2q+6T/N1hQxzwzRMxI1Nrtf3didGVY0/tJFilANQhB5
 # oYIDJjCCAyIGCSqGSIb3DQEJBjGCAxMwggMPAgEBMH0waTELMAkGA1UEBhMCVVMx
 # FzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMUEwPwYDVQQDEzhEaWdpQ2VydCBUcnVz
 # dGVkIEc0IFRpbWVTdGFtcGluZyBSU0E0MDk2IFNIQTI1NiAyMDI1IENBMQIQCE/c
 # M09+RU7bww+P+ZIYNTANBglghkgBZQMEAgEFAKBpMBgGCSqGSIb3DQEJAzELBgkq
-# hkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2MDkzMDE1NTYwNVowLwYJKoZIhvcN
-# AQkEMSIEIONTbleFdOCF+wcKehsofNFyZmA93iN9gX1LcPBFvxrNMA0GCSqGSIb3
-# DQEBAQUABIICABLUvRJ3XjpQk3xlt7wjzIla82OFKvsdh8MFKObZCnoUf5dY8998
-# e7Iiq4rKcQqa8oWAMMPWcfejjGgltV3XvXpCO9Zpw038tkF6osuqiCQgnGgIuQRz
-# RhbDcNImTgw9er7iP5dJX+GrH7MzGlTXdqzVQX+WyhyVkyQ3UIJIJ7FApdgGuXzl
-# 93UhasJmh5Ps7czMZPhvEuzvJaKdKJhsdB/h0vmCyGh7BQ5xP6CSXH/pKx90PTMz
-# wAesZ6BGo77cCZkZLEs4TdLjokZMOIy3e/leFBErlPHSJVl4fb4SYp8AB8pRmFvf
-# fnX30gkDE71XcWQ0hmkw9Dy1YyqQf8jRxdU/rxjpBQsYksL/A3ecAN5l2vEThgpc
-# comQ6lsBj2qq2ekwt5wYl3RznYvGg3cJXFjnqXSnq8BcnUDcajMiyPh1aR2AuZNK
-# rbpgMMcCUekGESVGDzTgBJ1srQGpHyPiZ0ZU8GvCRAjq/igb/DmUegHkqtt0r36n
-# R/AyVTESSCI5PpiJZnCuNih0Ri42UOtwYnLeb0ccZ10BD50Sah88je7dqc8xMoHQ
-# qcFp18IbKeSM/N8SKF3YvjsUCgSmjIVas+vl1epPp+hNz2Rth9YjuvyNOKJGJrVQ
-# cEDiZNEeolrx8zaLu3amaF1XTm1v1PXpNFYJ2TolmsN6Ou7rbVwUu7Jl
+# hkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2MDkzMDE2MDQ1NlowLwYJKoZIhvcN
+# AQkEMSIEIHfDYxBaYHsbpbqUAHpEVGukrG7p/BJNcZrosFb1s6feMA0GCSqGSIb3
+# DQEBAQUABIICAH9rjTEzmAnLqBv5HbSBINkrGhUMQROKtm387jcvAMdik/WEv5yv
+# glMAgNYCLRAG2aaxJeUkGdhp19kHdIdo5+TK6GmZmiMIZD6+KxpJlZw56iJUOy0p
+# kA+Y+R//jJWb50er3hpd2A0TF+cXBre8JyfVAVjR/Oj/ZuZDI7G1tJya6hL3Fn6q
+# RKApkex8D6wRsjyisVvz37y7OryDnxfxeppYHuCEnDBmxvgz1lZjxxEk07jxON6B
+# G3M9zUNFfGoowYkK0yqEaEKTLY64iaXzFponaDyUL2dFBBFaX/2sCnrx482AOeFh
+# 8iIUojv0koSiD/ssKcY8kjBHGExUbFf+2+qpi4FZAK4IVQnjXl0KGvOBvlYNijCE
+# pey+lBFnqIyUI49Gr0WkA3GuphzeAcbwFa6TSMVf+pltJN1liL50kJ1uPcJIsj0G
+# tItUEetYucPRkbSMrHZuJ745+1jQtGaclpB8lqUV7rdcAg2Mbqa93nL3c00z/VJN
+# b2vEFMnbGfgX6rkt2sC5QEFzunJefpxUgouHJ9aph6sZYBc2i783K3Kz51ESQ/Km
+# vaiPc1EbRzCmiSzLsHhbr7n+bz5/jamJjWqv1UNL+PzqvQaoohkPOG6l+qkrjREN
+# gYAqXOvqJ4S3TrCPoBV9e2S3WR8iB0JsAeOpZaEfgyDqy8rzAu4bG+6c
 # SIG # End signature block
