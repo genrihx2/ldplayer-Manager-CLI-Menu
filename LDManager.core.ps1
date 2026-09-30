@@ -2320,7 +2320,10 @@ function Show-GithubMenu {
 # ===========================================================================
 function Invoke-ScriptSigning {
     Write-Title 'Цифровая подпись скрипта'
-    if (-not $PSCommandPath) { Write-Fail 'Не удалось определить путь скрипта.'; Wait-Enter; return }
+    # $PSCommandPath пуст, когда ядро загружено через точку входа LDManager.ps1 —
+    # путь точки входа строим от $scriptRoot (определён в обоих контекстах).
+    if (-not $scriptRoot) { Write-Fail 'Не удалось определить путь скрипта.'; Wait-Enter; return }
+    $entryPath = Join-Path $scriptRoot 'LDManager.ps1'
 
     $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue |
             Where-Object { $_.Subject -like '*LDManager*' } | Select-Object -First 1
@@ -2360,7 +2363,7 @@ function Invoke-ScriptSigning {
 
     # Подписываем ВСЕ файлы скрипта: при AllSigned каждая загружаемая единица
     # (точка входа, ядро, Sieve) должна иметь валидную подпись.
-    $files = @($PSCommandPath)
+    $files = @($entryPath)
     foreach ($f in @((Join-Path $scriptRoot 'LDManager.core.ps1'), (Join-Path $scriptRoot 'LD.Sieve.ps1'))) {
         if ((Test-Path $f) -and ($files -notcontains $f)) { $files += $f }
     }
@@ -2406,7 +2409,8 @@ function Show-VersionInfo {
     Write-Host "  PowerShell         : $psv"
     Write-Host ("  Windows            : $([Environment]::OSVersion.VersionString)")
 
-    $sig = Get-AuthenticodeSignature -FilePath $PSCommandPath -ErrorAction SilentlyContinue
+    $entryPath = Join-Path $scriptRoot 'LDManager.ps1'
+    $sig = if ($entryPath -and (Test-Path $entryPath)) { Get-AuthenticodeSignature -FilePath $entryPath -ErrorAction SilentlyContinue } else { $null }
     $sigStatus = if ($sig) { "$($sig.Status)" } else { 'нет' }
     Write-Host "  Подпись скрипта    : $sigStatus"
 
@@ -2675,8 +2679,8 @@ try {
 # SIG # Begin signature block
 # MIIb5gYJKoZIhvcNAQcCoIIb1zCCG9MCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUKJyerdGpancBfImX/cmygHEi
-# iImgghZQMIIDEjCCAfqgAwIBAgIQHb8OO1X7MrdClKYHA5HxWzANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUy1JLlOHIlEw+HMrQrZbtKQJQ
+# i2OgghZQMIIDEjCCAfqgAwIBAgIQHb8OO1X7MrdClKYHA5HxWzANBgkqhkiG9w0B
 # AQsFADAhMR8wHQYDVQQDDBZMRE1hbmFnZXIgQ29kZSBTaWduaW5nMB4XDTI2MDkz
 # MDExNDMzNFoXDTI5MDkzMDExNTMzNFowITEfMB0GA1UEAwwWTERNYW5hZ2VyIENv
 # ZGUgU2lnbmluZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKaLCNs9
@@ -2798,28 +2802,28 @@ try {
 # zJZA9P2DMYIFADCCBPwCAQEwNTAhMR8wHQYDVQQDDBZMRE1hbmFnZXIgQ29kZSBT
 # aWduaW5nAhAdvw47Vfsyt0KUpgcDkfFbMAkGBSsOAwIaBQCgeDAYBgorBgEEAYI3
 # AgEMMQowCKACgAChAoAAMBkGCSqGSIb3DQEJAzEMBgorBgEEAYI3AgEEMBwGCisG
-# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMCMGCSqGSIb3DQEJBDEWBBTwWfm3JhLq
-# dEGluMMQfAClNKQqxDANBgkqhkiG9w0BAQEFAASCAQArSvGq1CN/rFUaKE605Mxw
-# MnTdliBT/PrbBUlXBsJdBpb6MPzth9hzKXzCgagzP8vkCHh8cpA82EPga6R9Y68r
-# uf5DP41ZOMwMPiVMQgLwNb9NBIpVG4hRPfYawL3mugxTGJwkXCfDmaDDUNsCDBpx
-# HjGlC7NX2wAhxkg9H/0B3iTfpLWeZiS9ePzrutoxBKkq+meFSKtwwDvOuoESFdwj
-# OE1zaRp3SZIKRoRzaR3Wr6zDJO2Zz5EM2FLCompJpdq1M+oBf5Bkyo0wy/zAMA9F
-# DtSlJ3p3adHNcFBa2te2ABLomifdTrJLOukeNdwL38ytNkctDD1lW7DWmGhZF8cK
+# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMCMGCSqGSIb3DQEJBDEWBBRE86yWr3My
+# NOKU+Qb0O/mlANIiuDANBgkqhkiG9w0BAQEFAASCAQCboTEXEWdD1z1fpQ+3fDYn
+# SOBuD0i87lwOeDyWQwCDfnW2Y5jzLnAway6y6pdFHs4Rz4ASEhRxVU0InhI1SkQO
+# sLhzdMwQBWW16QipU7tmscOia7L5Jh9eioCrYxZpj7tA/W+i0seEDmch81ls998M
+# +/szQATWiJNMCfleYmgoYNCyKnVAQ51R06kKh5qVYSClRq2r+8iq3IKwpwNzXhtG
+# qxe5yMg1gXYRzCf0CMTu6xq0H2bwxS2HCSCqYPwCr/Tj9VB1WknsBO7bdAXcZgyK
+# yN4f3CFhdus2kRpG2HH8pRHfRPnpYUSM5t0qc458wda59ZEu7FB4TtG5DwCver1k
 # oYIDJjCCAyIGCSqGSIb3DQEJBjGCAxMwggMPAgEBMH0waTELMAkGA1UEBhMCVVMx
 # FzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMUEwPwYDVQQDEzhEaWdpQ2VydCBUcnVz
 # dGVkIEc0IFRpbWVTdGFtcGluZyBSU0E0MDk2IFNIQTI1NiAyMDI1IENBMQIQCE/c
 # M09+RU7bww+P+ZIYNTANBglghkgBZQMEAgEFAKBpMBgGCSqGSIb3DQEJAzELBgkq
-# hkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2MDkzMDEyMzUzM1owLwYJKoZIhvcN
-# AQkEMSIEIL5vrB2WqfuEkD9/BEZmv+3ED9XbrSEbjyjKF3pixluzMA0GCSqGSIb3
-# DQEBAQUABIICAALDhE9TpOMNWMiRNdTS8cytEbmtLwR0oMy/8gH2ypqWIGRXVJYO
-# IEyJNB+k49gAvlym8K6Y2f56dkD0KXVifQhV3qPyriXkk02stJwaoM2Xy5wxueDt
-# jTJpIJMuu4hNxwGfKF4LE8Yg1+V+cXDx9l7tFF6C0gjNhnCJU2i7+stFQXfXpQlq
-# kWucBkazpkMowc7QKLe/Zz+wB4/3zg0Uq05IkjJDeHM+sKpFYYFgEHfOuVX+DzcZ
-# P/rANtj+UVL9rf0U/kjRec6hYQvQLOI2rTEZkpdpylQFrRUZ6hyhR+bXQIqvzMLi
-# zBw2wirFUZYenubAOuMhI9s00wgFrgXGwAvSJKoBaIQwam+VT7EwRDolPm+wYCir
-# Nycf0Zne7gY1tWrg4Rxqt8M0MZJNQ3Wz5geOy+m0px71O7zoA/QaJ+QPdKKEqoqu
-# Tk4/HL1OwSPOgp+yTby3xLo2UtEpWay5HGbIW5cbvDpodoFVmWFU3R2lFMU2nniA
-# cXuKsLHVxUi0TuvIJiftKaRic3xiO7euGLbnJt56KkeNzaeEuWEOkB/eOpj07UzO
-# S8HXsOGXDG6p/WQfr8KNkQDW5Zzrw6Yx7WCiDsnVXFpboCoJH8jqqZiYf8XSjKmP
-# +w0UvR+PmYQek3GlRkyNV5HrsUVfqs2nkzfPsRNYsJCoBwS/3liBrjZI
+# hkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2MDkzMDEzMTEyNFowLwYJKoZIhvcN
+# AQkEMSIEIDlBHdeeXiucBV7VuL5kbqKcaKCfWGmVyxnA10vBtklCMA0GCSqGSIb3
+# DQEBAQUABIICAGC19yqIBr3p10lOpOQaCOAks2vpEzJoopfx6AArvDg6HsTsc/9L
+# TJ275q3bUVE3HJx6Q6wfUh9C8UgKG3vcSt16fxdeuklaOzDdnJ8OY8cAq0Kevpvi
+# ivwEXLC02HfVUQ16sk5PkrOHiHBjUw4/jsT/L0Dd8kENt0gGx0Pdq49vm/E8qceo
+# G+C+jG4+LKhcIo0uAOe/7oAe3+dtoJ7jwjctqkFSnCsO4l5f+laNmlbdlJzpHhX0
+# I4Doy7C3uyCQZ+uTgOYXVcnX6PCYXNZbjwP6AzC37hHkdjw4hwI3PR8z2Jqrp9p7
+# AS+i5xpoI/A4IHhegusYVer9MMX+5OvA3qvzYUp4vrlYoQoZrX+jxzFyJXcOR26d
+# AbXNs7HqccR5ZvOuQwDuWCyhPVPOLOZ4QRS4pLQJ/+SqjTk+Ji0Ju0pYEEzBof9f
+# ZbYZjdwNdUgO9RCklAWDQXWi7X+YqYxpIpZuT06zcDsPly+SDgr1VsZ4hsrZc02C
+# zSLyty0/oMqztG/78axCh3G6Qg7/fIwFQEbFv26e3bl5cOXTrhHPlmc85WpMhd72
+# ECgtQal4DbLPH4Hc9Lm2AAwkW+LHQDNqZTRmv92PJbkAM73pCrD/Ctc6Anm8VwS4
+# wYhi3GD+VEmFt7VqNdi0++0L+MjdIlV3tcJ3WYXObo3mVvtMZEm3yBWn
 # SIG # End signature block
