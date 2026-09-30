@@ -1950,7 +1950,49 @@ function Get-GithubHeaders {
 # ---------------------------------------------------------------------------
 # Диагностика доступа к GitHub: по каждому хосту — точная причина сбоя
 # (DNS / TCP / TLS / HTTP-статус), а не общее «нет сети».
+# DNS и TCP вынесены в отдельные функции, чтобы Pester мог их подменять.
 # ---------------------------------------------------------------------------
+function Resolve-GithubHost {
+    param([string]$HostName)
+    try {
+        $addrs = [System.Net.Dns]::GetHostAddresses($HostName)
+        if ($addrs -and $addrs.Count -gt 0) { return @{ Ok = $true; Addresses = $addrs } }
+        return @{ Ok = $false; Error = "DNS: хост ${HostName} не резолвится" }
+    } catch {
+        return @{ Ok = $false; Error = "DNS: не удалось разрешить ${HostName} ($($_.Exception.Message))" }
+    }
+}
+
+function Test-GithubTcpPort {
+    param([string]$HostName, [int]$Port = 443, [int]$TimeoutMs = 5000)
+    $tcp = New-Object System.Net.Sockets.TcpClient
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        $t = $tcp.BeginConnect($HostName, $Port, $null, $null)
+        if (-not $t.AsyncWaitHandle.WaitOne($TimeoutMs)) {
+            return @{ Ok = $false; Error = "TCP: таймаут подключения к ${HostName}:${Port} (${TimeoutMs} мс)" }
+        }
+        $tcp.EndConnect($t)
+        $sw.Stop()
+        return @{ Ok = $true; LatencyMs = [int]$sw.ElapsedMilliseconds }
+    } catch {
+        return @{ Ok = $false; Error = "TCP: не удалось подключиться к ${HostName}:${Port} ($($_.Exception.Message))" }
+    } finally { try { $tcp.Close() } catch { } }
+}
+
+# Достаёт HTTP-статус из записи об ошибке (Exception.Response.StatusCode).
+# Отдельная функция, чтобы можно было протестировать на синтетических объектах.
+function Get-HttpErrorStatusCode {
+    param($ErrorRecord)
+    if ($ErrorRecord -and $ErrorRecord.Exception) {
+        $resp = $ErrorRecord.Exception.Response
+        if ($resp -and $resp.PSObject.Properties['StatusCode']) {
+            try { return [int]$resp.StatusCode } catch { return $null }
+        }
+    }
+    return $null
+}
+
 function Test-GithubEndpoint {
     param([Parameter(Mandatory = $true)][string]$Url)
 
@@ -1959,29 +2001,13 @@ function Test-GithubEndpoint {
     $res = @{ Url = $Url; Ok = $false; Detail = $null; HttpCode = $null; LatencyMs = $null }
 
     # 1) DNS
-    try {
-        $addrs = [System.Net.Dns]::GetHostAddresses($hostName)
-        if (-not $addrs -or $addrs.Count -eq 0) { $res.Detail = "DNS: хост ${hostName} не резолвится"; return $res }
-    } catch {
-        $res.Detail = "DNS: не удалось разрешить ${hostName} ($($_.Exception.Message))"
-        return $res
-    }
+    $dns = Resolve-GithubHost -HostName $hostName
+    if (-not $dns.Ok) { $res.Detail = $dns.Error; return $res }
 
     # 2) TCP 443
-    $tcp = New-Object System.Net.Sockets.TcpClient
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    try {
-        $t = $tcp.BeginConnect($hostName, 443, $null, $null)
-        if (-not $t.AsyncWaitHandle.WaitOne(5000)) { $tcp.Close(); $res.Detail = "TCP: таймаут подключения к ${hostName}:443 (5 с)"; return $res }
-        $tcp.EndConnect($t)
-        $sw.Stop()
-        $res.LatencyMs = [int]$sw.ElapsedMilliseconds
-    } catch {
-        $sw.Stop()
-        $tcp.Close()
-        $res.Detail = "TCP: не удалось подключиться к ${hostName}:443 ($($_.Exception.Message))"
-        return $res
-    } finally { try { $tcp.Close() } catch { } }
+    $tcpRes = Test-GithubTcpPort -HostName $hostName
+    if (-not $tcpRes.Ok) { $res.Detail = $tcpRes.Error; return $res }
+    $res.LatencyMs = $tcpRes.LatencyMs
 
     # 3) HTTPS-запрос (TLS + HTTP-статус)
     try {
@@ -1989,9 +2015,8 @@ function Test-GithubEndpoint {
         $res.Ok = $true; $res.HttpCode = [int]$r.StatusCode
         return $res
     } catch {
-        $resp = $_.Exception.Response
-        if ($resp) {
-            $code = [int]$resp.StatusCode
+        $code = Get-HttpErrorStatusCode $_
+        if ($code) {
             $res.HttpCode = $code
             if ($code -ge 400) { $res.Ok = $true; return $res }  # хост доступен, код — уже вопрос API
             $res.Detail = "HTTP $code ($($_.Exception.Message))"
@@ -2049,9 +2074,8 @@ function Get-RemoteScriptVersion {
             if ($resp.Content -match "\`$script:ScriptVersion\s*=\s*'([0-9\.]+)'") { return $matches[1] }
             $lastErr = "файл $f скачан (HTTP $($resp.StatusCode)), но строки версии в нём нет"
         } catch {
-            $resp = $_.Exception.Response
-            if ($resp) {
-                $code = [int]$resp.StatusCode
+            $code = Get-HttpErrorStatusCode $_
+            if ($code) {
                 $hint = switch ($code) {
                     403 { ' (превышен лимит запросов GitHub - сохраните токен в меню [1])' }
                     404 { ' (файл не найден - проверьте ветку и имя репозитория)' }
@@ -2597,8 +2621,8 @@ try {
 # SIG # Begin signature block
 # MIIb5gYJKoZIhvcNAQcCoIIb1zCCG9MCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUspaJDxwHoldb3syd6R1XpiQx
-# vjqgghZQMIIDEjCCAfqgAwIBAgIQHb8OO1X7MrdClKYHA5HxWzANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUKJyerdGpancBfImX/cmygHEi
+# iImgghZQMIIDEjCCAfqgAwIBAgIQHb8OO1X7MrdClKYHA5HxWzANBgkqhkiG9w0B
 # AQsFADAhMR8wHQYDVQQDDBZMRE1hbmFnZXIgQ29kZSBTaWduaW5nMB4XDTI2MDkz
 # MDExNDMzNFoXDTI5MDkzMDExNTMzNFowITEfMB0GA1UEAwwWTERNYW5hZ2VyIENv
 # ZGUgU2lnbmluZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKaLCNs9
@@ -2720,28 +2744,28 @@ try {
 # zJZA9P2DMYIFADCCBPwCAQEwNTAhMR8wHQYDVQQDDBZMRE1hbmFnZXIgQ29kZSBT
 # aWduaW5nAhAdvw47Vfsyt0KUpgcDkfFbMAkGBSsOAwIaBQCgeDAYBgorBgEEAYI3
 # AgEMMQowCKACgAChAoAAMBkGCSqGSIb3DQEJAzEMBgorBgEEAYI3AgEEMBwGCisG
-# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMCMGCSqGSIb3DQEJBDEWBBT6SjeEKMsm
-# 4QZINVLdX9S3FLe62jANBgkqhkiG9w0BAQEFAASCAQAi/VEuzmZQu2alclvoy5qK
-# pHCUNCFuPZOT05t/CroiMK+cG+qkJCz86KQwVLAlfWhnMgwOv7vTgG1/MUAogJ0k
-# hk0wPy5CRes0/yTq/PN6Ab1e8a7klGPd+vfuqTMfNa1iuqBjQCnvnDvbA69mjo1V
-# 1FrqDBIV3E2CMUVsRoJMUpPP/zr1LWCrbKKT7oUuryoOP3MLYnhwsJWO5vwQ/xD3
-# 0XYVWTCgYQLyBXRuI+QteMvM1GM/YYVBNMx2/DlEf446/enidywTPlClWRj8+I1o
-# R5QDn2gbzyizlyC6e5UCjxxNCP7lJIUv04jq70HMExNEMXVIojln3YUQmT7kWbm0
+# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMCMGCSqGSIb3DQEJBDEWBBTwWfm3JhLq
+# dEGluMMQfAClNKQqxDANBgkqhkiG9w0BAQEFAASCAQArSvGq1CN/rFUaKE605Mxw
+# MnTdliBT/PrbBUlXBsJdBpb6MPzth9hzKXzCgagzP8vkCHh8cpA82EPga6R9Y68r
+# uf5DP41ZOMwMPiVMQgLwNb9NBIpVG4hRPfYawL3mugxTGJwkXCfDmaDDUNsCDBpx
+# HjGlC7NX2wAhxkg9H/0B3iTfpLWeZiS9ePzrutoxBKkq+meFSKtwwDvOuoESFdwj
+# OE1zaRp3SZIKRoRzaR3Wr6zDJO2Zz5EM2FLCompJpdq1M+oBf5Bkyo0wy/zAMA9F
+# DtSlJ3p3adHNcFBa2te2ABLomifdTrJLOukeNdwL38ytNkctDD1lW7DWmGhZF8cK
 # oYIDJjCCAyIGCSqGSIb3DQEJBjGCAxMwggMPAgEBMH0waTELMAkGA1UEBhMCVVMx
 # FzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMUEwPwYDVQQDEzhEaWdpQ2VydCBUcnVz
 # dGVkIEc0IFRpbWVTdGFtcGluZyBSU0E0MDk2IFNIQTI1NiAyMDI1IENBMQIQCE/c
 # M09+RU7bww+P+ZIYNTANBglghkgBZQMEAgEFAKBpMBgGCSqGSIb3DQEJAzELBgkq
-# hkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2MDkzMDEyMjIyMlowLwYJKoZIhvcN
-# AQkEMSIEIH4gmZzXkZZEig+Tqhft6MMLDS1aDphkWgd6CTl30l8sMA0GCSqGSIb3
-# DQEBAQUABIICAAGrEuQxf/K+OCu7vjYX9sbdPE9rcsN4N0+/09Kh26BUbFkzUYGr
-# tOhfqOfsI6ASSxR6gt2IQ5rgviv4dyoQE4jFby/T3AEd5Z4DkKntnGiiAxVfn9bw
-# cs5CCgyWklKO20EcRP4LqfmU2b03jrDRkjSZ9Fm03/SbgyLb3D/f0rU5FjWyR6/Z
-# yACXd5IIX3XyS/52H0WM5AJw9cvpDyaxJ/z3IiO3hKJiqWUeyIDqyVPrArF7TF7W
-# 5Q8e5CqVN+aPrSVnn6KMM1p4vaYiU1Pg7ibMW/SrX3QN3FpeF484rNbFvNwbBRjD
-# TXA0F5qp10Dle/hmA0QKcdQdsyJlO1R4igwkV/JNDc998ktmcIdcDLI2gwA3AaKI
-# CBStug+YZ8O9cUAB/qADfHg9Il/eg0FMGUym8gFmhPPu1z1RK1K5QdZodaBmB9bO
-# bG+RwxI1Ri/tGuSB7S83UKgeSdldF9jahhTbBD9I/Bw6KJH3Fk38Za04vhymDnQa
-# 6VEQ/VJovy4hYGBFjCaprlXzgZYRerKUhDHVQyQUU9QqTMSu1c9bdBhAaC5/pM3c
-# fOU5eLFWZmsyKFEy6lmFC7sK+Xhku9uBLh5oeDn1IL1qpN51bL8CcCPOFQuk0H/w
-# YWI5WMf302+eqRHwZW1xr3kC1wQEdFPsPNfeatDk0tszQI7cjZ5/bW23
+# hkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2MDkzMDEyMzUzM1owLwYJKoZIhvcN
+# AQkEMSIEIL5vrB2WqfuEkD9/BEZmv+3ED9XbrSEbjyjKF3pixluzMA0GCSqGSIb3
+# DQEBAQUABIICAALDhE9TpOMNWMiRNdTS8cytEbmtLwR0oMy/8gH2ypqWIGRXVJYO
+# IEyJNB+k49gAvlym8K6Y2f56dkD0KXVifQhV3qPyriXkk02stJwaoM2Xy5wxueDt
+# jTJpIJMuu4hNxwGfKF4LE8Yg1+V+cXDx9l7tFF6C0gjNhnCJU2i7+stFQXfXpQlq
+# kWucBkazpkMowc7QKLe/Zz+wB4/3zg0Uq05IkjJDeHM+sKpFYYFgEHfOuVX+DzcZ
+# P/rANtj+UVL9rf0U/kjRec6hYQvQLOI2rTEZkpdpylQFrRUZ6hyhR+bXQIqvzMLi
+# zBw2wirFUZYenubAOuMhI9s00wgFrgXGwAvSJKoBaIQwam+VT7EwRDolPm+wYCir
+# Nycf0Zne7gY1tWrg4Rxqt8M0MZJNQ3Wz5geOy+m0px71O7zoA/QaJ+QPdKKEqoqu
+# Tk4/HL1OwSPOgp+yTby3xLo2UtEpWay5HGbIW5cbvDpodoFVmWFU3R2lFMU2nniA
+# cXuKsLHVxUi0TuvIJiftKaRic3xiO7euGLbnJt56KkeNzaeEuWEOkB/eOpj07UzO
+# S8HXsOGXDG6p/WQfr8KNkQDW5Zzrw6Yx7WCiDsnVXFpboCoJH8jqqZiYf8XSjKmP
+# +w0UvR+PmYQek3GlRkyNV5HrsUVfqs2nkzfPsRNYsJCoBwS/3liBrjZI
 # SIG # End signature block

@@ -239,3 +239,120 @@ Describe 'Sieve: вход по коду устройства' {
         Should -Invoke Invoke-SieveHttp -Times 3 -Exactly
     }
 }
+
+Describe 'GitHub: диагностика Test-GithubEndpoint' {
+    It 'DNS не разрешился -> Ok=False и причина DNS' {
+        Mock Resolve-GithubHost { return @{ Ok = $false; Error = 'DNS: не удалось разрешить badhost (boom)' } }
+        $r = Test-GithubEndpoint -Url 'https://badhost/x'
+        $r.Ok | Should -BeFalse
+        $r.Detail | Should -Match 'DNS'
+        $r.HttpCode | Should -BeNull
+    }
+
+    It 'TCP-подключение не удалось -> Ok=False и причина TCP' {
+        Mock Resolve-GithubHost { return @{ Ok = $true; Addresses = @([net.ipaddress]'127.0.0.1') } }
+        Mock Test-GithubTcpPort { return @{ Ok = $false; Error = 'TCP: не удалось подключиться к badhost:443 (refused)' } }
+        $r = Test-GithubEndpoint -Url 'https://badhost/x'
+        $r.Ok | Should -BeFalse
+        $r.Detail | Should -Match 'TCP'
+        $r.HttpCode | Should -BeNull
+    }
+
+    It 'HTTP 200 -> Ok=True, код и задержка заполнены' {
+        Mock Resolve-GithubHost { return @{ Ok = $true; Addresses = @([net.ipaddress]'127.0.0.1') } }
+        Mock Test-GithubTcpPort { return @{ Ok = $true; LatencyMs = 12 } }
+        Mock Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200; Content = 'ok' } }
+        $r = Test-GithubEndpoint -Url 'https://goodhost/x'
+        $r.Ok | Should -BeTrue
+        $r.HttpCode | Should -Be 200
+        $r.LatencyMs | Should -Be 12
+        $r.Detail | Should -BeNull
+    }
+
+    It 'HTTP 403/404 (хост доступен) -> Ok=True, код сохранён' {
+        Mock Resolve-GithubHost { return @{ Ok = $true; Addresses = @([net.ipaddress]'127.0.0.1') } }
+        Mock Test-GithubTcpPort { return @{ Ok = $true; LatencyMs = 5 } }
+        foreach ($code in 403, 404) {
+            Mock Invoke-WebRequest { throw 'boom' }
+            Mock Get-HttpErrorStatusCode { return $code }
+            $r = Test-GithubEndpoint -Url 'https://goodhost/x'
+            $r.Ok | Should -BeTrue
+            $r.HttpCode | Should -Be $code
+        }
+    }
+
+    It 'Get-HttpErrorStatusCode достаёт код из синтетического исключения' {
+        $err = [pscustomobject]@{ Exception = [pscustomobject]@{ Response = [pscustomobject]@{ StatusCode = [pscustomobject]@{ } } } }
+        # StatusCode как enum-подобный объект: проверяем обычный путь через int
+        $err2 = [pscustomobject]@{ Exception = [pscustomobject]@{ Response = [pscustomobject]@{ StatusCode = 404 } } }
+        Get-HttpErrorStatusCode $err2 | Should -Be 404
+        # без Response -> null
+        Get-HttpErrorStatusCode ([pscustomobject]@{ Exception = [pscustomobject]@{ } }) | Should -BeNull
+        Get-HttpErrorStatusCode $null | Should -BeNull
+        # исключение без поля Response
+        Get-HttpErrorStatusCode ([pscustomobject]@{ Exception = (New-Object System.Exception('x')) }) | Should -BeNull
+    }
+
+    It 'HTTPS-сбой без ответа (TLS) -> Ok=False и текст ошибки' {
+        Mock Resolve-GithubHost { return @{ Ok = $true; Addresses = @([net.ipaddress]'127.0.0.1') } }
+        Mock Test-GithubTcpPort { return @{ Ok = $true; LatencyMs = 5 } }
+        Mock Invoke-WebRequest { throw (New-Object System.Net.WebException('TLS handshake failed')) }
+        $r = Test-GithubEndpoint -Url 'https://goodhost/x'
+        $r.Ok | Should -BeFalse
+        $r.Detail | Should -Match 'HTTPS'
+    }
+}
+
+Describe 'GitHub: причины ошибок проверки обновлений' {
+    BeforeEach {
+        $script:LastUpdateCheckError = $null
+    }
+
+    It 'HTTP 403 -> причина с подсказкой про лимит и токен' {
+        Mock Invoke-WebRequest { throw 'boom' }
+        Mock Get-HttpErrorStatusCode { return 403 }
+        $u = Test-UpdateAvailable
+        $u | Should -BeNull
+        $script:LastUpdateCheckError | Should -Match '403'
+        $script:LastUpdateCheckError | Should -Match 'лимит'
+        $script:LastUpdateCheckError | Should -Match 'токен'
+    }
+
+    It 'HTTP 404 -> причина с подсказкой про ветку/репозиторий' {
+        Mock Invoke-WebRequest { throw 'boom' }
+        Mock Get-HttpErrorStatusCode { return 404 }
+        $u = Test-UpdateAvailable
+        $u | Should -BeNull
+        $script:LastUpdateCheckError | Should -Match '404'
+        $script:LastUpdateCheckError | Should -Match 'не найден'
+    }
+
+    It 'сетевая ошибка без HTTP-ответа -> текст исключения в причине' {
+        Mock Invoke-WebRequest { throw (New-Object System.Net.WebException('connection refused')) }
+        $u = Test-UpdateAvailable
+        $u | Should -BeNull
+        $script:LastUpdateCheckError | Should -Match 'сетевая ошибка'
+        $script:LastUpdateCheckError | Should -Match 'connection refused'
+    }
+
+    It 'файл скачан, но без строки версии -> причина про отсутствие версии' {
+        Mock Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200; Content = 'no version line here' } }
+        $u = Test-UpdateAvailable
+        $u | Should -BeNull
+        $script:LastUpdateCheckError | Should -Match 'строки версии.*нет'
+    }
+
+    It 'версия получена -> причина сброса в null, результат сравнения корректен' {
+        Mock Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200; Content = "`$script:ScriptVersion = '9.9.9'" } }
+        $u = Test-UpdateAvailable
+        $u | Should -BeTrue
+        $script:LastUpdateCheckError | Should -BeNull
+    }
+
+    It 'локальная версия выше удалённой -> False без причины' {
+        Mock Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200; Content = "`$script:ScriptVersion = '1.0.0'" } }
+        $u = Test-UpdateAvailable
+        $u | Should -BeFalse
+        $script:LastUpdateCheckError | Should -BeNull
+    }
+}
