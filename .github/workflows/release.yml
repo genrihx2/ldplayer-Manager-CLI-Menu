@@ -1,0 +1,56 @@
+name: Release
+
+# Автоматический черновик релиза при пуше тега v*.
+# Заметки берутся из RELEASE_NOTES_<тег>.md (например RELEASE_NOTES_v2.0.1.md);
+# если файла нет, GitHub сгенерирует их сам (--generate-notes).
+# Релиз создаётся как draft: проверьте описание и нажмите Publish вручную.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  draft-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release zip
+        run: |
+          zip -j "LDManager-${{ steps.ver.outputs.version }}.zip" \
+            LDManager.ps1 LDManager.core.ps1 LD.Sieve.ps1 README.md LICENSE
+
+      - name: Resolve release notes file
+        id: notes
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if [ -f "RELEASE_NOTES_${tag}.md" ]; then
+            echo "file=RELEASE_NOTES_${tag}.md" >> "$GITHUB_OUTPUT"
+          else
+            echo "file=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES_FILE: ${{ steps.notes.outputs.file }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          args=("$tag" --draft --title "LDManager $tag" --verify-tag)
+          if [ -n "$NOTES_FILE" ]; then
+            args+=(--notes-file "$NOTES_FILE")
+          else
+            args+=(--generate-notes)
+          fi
+          args+=("LDManager-$VERSION.zip")
+          gh release create "${args[@]}"
