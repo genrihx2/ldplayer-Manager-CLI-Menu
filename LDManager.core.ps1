@@ -332,6 +332,8 @@ function Get-LDInstances {
     $raw = Invoke-LDConsole -Arguments @('list2')
     $runningRaw = Invoke-LDConsole -Arguments @('runninglist')
 
+    # Имена из runninglist. Формат зависит от версии: 'index,name,...' или просто
+    # имя на строке (наблюдается в LDPlayer 14) — разбираем оба варианта.
     $runningNames = @()
     if ($runningRaw) {
         foreach ($l in ($runningRaw -split "\r?\n")) {
@@ -339,6 +341,7 @@ function Get-LDInstances {
             if (-not $l) { continue }
             $f = $l.Split(',')
             if ($f.Count -ge 2) { $runningNames += $f[1].Trim() }
+            else { $runningNames += $l }
         }
     }
 
@@ -354,13 +357,13 @@ function Get-LDInstances {
             if (-not [int]::TryParse($f[0].Trim(), [ref]$idx)) { continue }
 
             $name = $f[1].Trim()
-            $running = $false
-            if ($runningNames -contains $name) {
-                $running = $true
-            } elseif ($runningNames.Count -eq 0) {
-                $r = 0
-                if ([int]::TryParse($f[4].Trim(), [ref]$r)) { $running = ($r -eq 1) }
-            }
+            # Признак запуска: поле 4 из list2 (Android запущен) ИЛИ имя в runninglist.
+            # Раньше поле list2 учитывалось только при ПУСТОМ runninglist: если тот
+            # возвращал непустой, но неразбираемый вывод, запущенный инстанс считался
+            # остановленным, и ADB-операции отказывали с «Инстанс не запущен».
+            $r = 0
+            $running = ([int]::TryParse($f[4].Trim(), [ref]$r) -and $r -eq 1)
+            if (-not $running -and $runningNames -contains $name) { $running = $true }
 
             $pidI = 0
             if ($f.Count -gt 5) { [void][int]::TryParse($f[5].Trim(), [ref]$pidI) }
@@ -444,6 +447,7 @@ function Select-LDInstance {
     }
     if ($RequireRunning -and -not $found.Running) {
         Write-Note 'Инстанс не запущен. Эта операция требует запущенного инстанса.'
+        Write-Note 'Если только что запустили его — подождите полной загрузки Android и повторите.'
         Wait-Enter
         return $null
     }
@@ -454,14 +458,18 @@ function Select-LDInstance {
 # Конфиг инстанса (vms\leidianN\config.ini) и команда modify
 # ---------------------------------------------------------------------------
 function Get-LDInstanceIdentity {
+    # Текущие значения идентификации инстанса. Два формата хранения:
+    #  - классика: vms\leidianN\config.ini (ключи imei=, imsi=, ...)
+    #  - LDPlayer 14: vms\config\leidianN.config (JSON, ключи propertySettings.*)
     param([int]$Index)
 
     $base = Split-Path $script:LdPath -Parent
+
+    # 1) Классический INI
     $iniCandidates = @(
         (Join-Path $base "vms\leidian$Index\config.ini"),
         (Join-Path $base "vms\dnplayer$Index\config.ini")
     )
-
     foreach ($ini in $iniCandidates) {
         if (Test-Path $ini) {
             $map = @{}
