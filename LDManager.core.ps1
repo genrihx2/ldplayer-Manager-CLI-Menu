@@ -1947,6 +1947,85 @@ function Get-GithubHeaders {
     return $h
 }
 
+# ---------------------------------------------------------------------------
+# Диагностика доступа к GitHub: по каждому хосту — точная причина сбоя
+# (DNS / TCP / TLS / HTTP-статус), а не общее «нет сети».
+# ---------------------------------------------------------------------------
+function Test-GithubEndpoint {
+    param([Parameter(Mandatory = $true)][string]$Url)
+
+    $uri  = [Uri]$Url
+    $hostName = $uri.Host
+    $res = @{ Url = $Url; Ok = $false; Detail = $null; HttpCode = $null; LatencyMs = $null }
+
+    # 1) DNS
+    try {
+        $addrs = [System.Net.Dns]::GetHostAddresses($hostName)
+        if (-not $addrs -or $addrs.Count -eq 0) { $res.Detail = "DNS: хост ${hostName} не резолвится"; return $res }
+    } catch {
+        $res.Detail = "DNS: не удалось разрешить ${hostName} ($($_.Exception.Message))"
+        return $res
+    }
+
+    # 2) TCP 443
+    $tcp = New-Object System.Net.Sockets.TcpClient
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        $t = $tcp.BeginConnect($hostName, 443, $null, $null)
+        if (-not $t.AsyncWaitHandle.WaitOne(5000)) { $tcp.Close(); $res.Detail = "TCP: таймаут подключения к ${hostName}:443 (5 с)"; return $res }
+        $tcp.EndConnect($t)
+        $sw.Stop()
+        $res.LatencyMs = [int]$sw.ElapsedMilliseconds
+    } catch {
+        $sw.Stop()
+        $tcp.Close()
+        $res.Detail = "TCP: не удалось подключиться к ${hostName}:443 ($($_.Exception.Message))"
+        return $res
+    } finally { try { $tcp.Close() } catch { } }
+
+    # 3) HTTPS-запрос (TLS + HTTP-статус)
+    try {
+        $r = Invoke-WebRequest -Uri $Url -Headers (Get-GithubHeaders) -TimeoutSec 20 -UseBasicParsing
+        $res.Ok = $true; $res.HttpCode = [int]$r.StatusCode
+        return $res
+    } catch {
+        $resp = $_.Exception.Response
+        if ($resp) {
+            $code = [int]$resp.StatusCode
+            $res.HttpCode = $code
+            if ($code -ge 400) { $res.Ok = $true; return $res }  # хост доступен, код — уже вопрос API
+            $res.Detail = "HTTP $code ($($_.Exception.Message))"
+        } else {
+            $res.Detail = "HTTPS: $($_.Exception.Message)"
+        }
+        return $res
+    }
+}
+
+function Show-GithubDiagnostics {
+    Write-Title 'Диагностика доступа к GitHub'
+    $endpoints = @(
+        @{ Name = 'api.github.com (API: релизы, проверка обновлений)'; Url = "https://api.github.com/repos/$script:RepoOwner/$script:RepoName/releases/latest" },
+        @{ Name = 'raw.githubusercontent.com (сырые файлы: версии, самообновление)'; Url = "https://raw.githubusercontent.com/$script:RepoOwner/$script:RepoName/$script:RepoBranch/LDManager.core.ps1" }
+    )
+    foreach ($ep in $endpoints) {
+        Write-Host ""
+        Write-Host "  $($ep.Name)"
+        $r = Test-GithubEndpoint -Url $ep.Url
+        if ($r.Ok) {
+            $lat = if ($r.LatencyMs) { " ({0} мс)" -f $r.LatencyMs } else { '' }
+            Write-Ok ("доступен: HTTP {0}{1}" -f $r.HttpCode, $lat)
+        } else {
+            Write-Fail $r.Detail
+        }
+    }
+    Write-Host ''
+    Write-Note 'Коды 403 (rate limit) и 404 (нет релизов) НЕ означают проблему сети.'
+    Write-Note '403 без токена: исчерпан лимит запросов GitHub — сохраните токен в [1].'
+    Write-Host ''
+    Wait-Enter
+}
+
 function Get-LatestReleaseInfo {
     try {
         $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$script:RepoOwner/$script:RepoName/releases/latest" -Headers (Get-GithubHeaders) -TimeoutSec 20
@@ -1960,31 +2039,59 @@ function Get-RemoteScriptVersion {
     # Версия задаётся в LDManager.core.ps1 (строка $script:ScriptVersion = 'X.Y.Z'),
     # поэтому читаем именно ядро, а не точку входа LDManager.ps1.
     # Запасной вариант: старые копии репозитория держали версию в точке входа.
+    # При неудаче в $script:LastUpdateCheckError кладётся точная причина сбоя.
+    $script:LastUpdateCheckError = $null
     $base = "https://raw.githubusercontent.com/$script:RepoOwner/$script:RepoName/$script:RepoBranch/"
+    $lastErr = $null
     foreach ($f in @('LDManager.core.ps1', 'LDManager.ps1')) {
         try {
-            $head = (Invoke-WebRequest -Uri ($base + $f) -Headers (Get-GithubHeaders) -TimeoutSec 20 -UseBasicParsing).Content
-            if ($head -match "\`$script:ScriptVersion\s*=\s*'([0-9\.]+)'") { return $matches[1] }
-        } catch { }
+            $resp = Invoke-WebRequest -Uri ($base + $f) -Headers (Get-GithubHeaders) -TimeoutSec 20 -UseBasicParsing
+            if ($resp.Content -match "\`$script:ScriptVersion\s*=\s*'([0-9\.]+)'") { return $matches[1] }
+            $lastErr = "файл $f скачан (HTTP $($resp.StatusCode)), но строки версии в нём нет"
+        } catch {
+            $resp = $_.Exception.Response
+            if ($resp) {
+                $code = [int]$resp.StatusCode
+                $hint = switch ($code) {
+                    403 { ' (превышен лимит запросов GitHub - сохраните токен в меню [1])' }
+                    404 { ' (файл не найден - проверьте ветку и имя репозитория)' }
+                    default { '' }
+                }
+                $lastErr = "HTTP $code при загрузке $f$hint"
+            } else {
+                $lastErr = "сетевая ошибка при загрузке ${f}: $($_.Exception.Message)"
+            }
+        }
     }
+    $script:LastUpdateCheckError = $lastErr
     return $null
 }
 
 function Test-UpdateAvailable {
     $remote = Get-RemoteScriptVersion
-    if (-not $remote) { return $null }
+    if (-not $remote) {
+        if (-not $script:LastUpdateCheckError) { $script:LastUpdateCheckError = 'не удалось получить версию (причина неизвестна)' }
+        return $null
+    }
     try {
         $vL = [version]$script:ScriptVersion
         $vR = [version]$remote
         return ($vR -gt $vL)
-    } catch { return $null }
+    } catch {
+        $script:LastUpdateCheckError = "не удалось разобрать версию: локальная '$script:ScriptVersion', удалённая '$remote'"
+        return $null
+    }
 }
 
 function Update-LDManagerSelf {
     # Самообновление: скачивает все файлы скрипта из репозитория и заменяет их
     Write-Title 'Автообновление из GitHub'
     $check = Test-UpdateAvailable
-    if ($check -eq $null) { Write-Fail 'Не удалось получить версию из GitHub (нет сети или репозиторий недоступен).'; Wait-Enter; return }
+    if ($check -eq $null) {
+        Write-Fail 'Не удалось получить версию из GitHub.'
+        if ($script:LastUpdateCheckError) { Write-Note ("Причина: " + $script:LastUpdateCheckError) }
+        Wait-Enter; return
+    }
     if (-not $check) { Write-Ok "У вас актуальная версия ($script:ScriptVersion)."; Wait-Enter; return }
 
     $remote = Get-RemoteScriptVersion
@@ -2103,6 +2210,7 @@ function Show-GithubMenu {
         Write-Host '  [2] Проверить обновления'
         Write-Host '  [3] Автообновление скрипта из GitHub'
         Write-Host '  [4] Загрузка репозитория (clone / ZIP / файл)'
+        Write-Host '  [5] Диагностика доступа к GitHub'
         Write-Host ''
         Write-Host '  [0] Назад'
         $c = (Read-Host 'Выбор').Trim()
@@ -2110,13 +2218,18 @@ function Show-GithubMenu {
             '1' { Show-GithubTokenMenu }
             '2' {
                 $upd = Test-UpdateAvailable
-                if ($upd -eq $null) { Write-Fail 'Не удалось проверить (нет сети или репозиторий недоступен).' }
+                if ($upd -eq $null) {
+                    Write-Fail 'Не удалось проверить обновления.'
+                    if ($script:LastUpdateCheckError) { Write-Note ("Причина: " + $script:LastUpdateCheckError) }
+                    Write-Note 'Подробнее: [5] Диагностика доступа к GitHub.'
+                }
                 elseif ($upd)       { Write-Note 'Доступна новая версия! Используйте «Автообновление».' }
                 else                { Write-Ok "У вас актуальная версия ($script:ScriptVersion)." }
                 Wait-Enter
             }
             '3' { Update-LDManagerSelf }
             '4' { Show-RepoMenu }
+            '5' { Show-GithubDiagnostics }
             '0' { return }
             'q' { return }
             default { Write-Fail 'Неизвестный пункт меню.'; Start-Sleep -Milliseconds 500 }
@@ -2222,7 +2335,10 @@ function Show-VersionInfo {
     Write-Host ''
     Write-Host '  Проверка обновлений...'
     $upd = Test-UpdateAvailable
-    if ($upd -eq $null)      { Write-Note 'Не удалось проверить обновления (нет доступа к GitHub).' }
+    if ($upd -eq $null) {
+        Write-Note 'Не удалось проверить обновления.'
+        if ($script:LastUpdateCheckError) { Write-Note ("  Причина: " + $script:LastUpdateCheckError) }
+    }
     elseif ($upd)            { Write-Note 'Доступна новая версия! См. пункт «Автообновление».' }
     else                     { Write-Ok 'У вас актуальная версия.' }
     Wait-Enter
@@ -2415,6 +2531,7 @@ function Show-GithubMenu {
         Write-Host '  [2] Проверить обновления'
         Write-Host '  [3] Автообновление скрипта из GitHub'
         Write-Host '  [4] Загрузка репозитория (clone / ZIP / файл)'
+        Write-Host '  [5] Диагностика доступа к GitHub'
         Write-Host ''
         Write-Host '  [0] Назад'
         $c = (Read-Host 'Выбор').Trim()
@@ -2422,13 +2539,18 @@ function Show-GithubMenu {
             '1' { Show-GithubTokenMenu }
             '2' {
                 $upd = Test-UpdateAvailable
-                if ($upd -eq $null) { Write-Fail 'Не удалось проверить (нет сети или репозиторий недоступен).' }
+                if ($upd -eq $null) {
+                    Write-Fail 'Не удалось проверить обновления.'
+                    if ($script:LastUpdateCheckError) { Write-Note ("Причина: " + $script:LastUpdateCheckError) }
+                    Write-Note 'Подробнее: [5] Диагностика доступа к GitHub.'
+                }
                 elseif ($upd)       { Write-Note 'Доступна новая версия! Используйте «Автообновление».' }
                 else                { Write-Ok "У вас актуальная версия ($script:ScriptVersion)." }
                 Wait-Enter
             }
             '3' { Update-LDManagerSelf }
             '4' { Show-RepoMenu }
+            '5' { Show-GithubDiagnostics }
             '0' { return }
             'q' { return }
             default { Write-Fail 'Неизвестный пункт меню.'; Start-Sleep -Milliseconds 500 }
@@ -2475,8 +2597,8 @@ try {
 # SIG # Begin signature block
 # MIIb5gYJKoZIhvcNAQcCoIIb1zCCG9MCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUTXU6bXneeY54RIR6EEcvSnig
-# 9oagghZQMIIDEjCCAfqgAwIBAgIQHb8OO1X7MrdClKYHA5HxWzANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUspaJDxwHoldb3syd6R1XpiQx
+# vjqgghZQMIIDEjCCAfqgAwIBAgIQHb8OO1X7MrdClKYHA5HxWzANBgkqhkiG9w0B
 # AQsFADAhMR8wHQYDVQQDDBZMRE1hbmFnZXIgQ29kZSBTaWduaW5nMB4XDTI2MDkz
 # MDExNDMzNFoXDTI5MDkzMDExNTMzNFowITEfMB0GA1UEAwwWTERNYW5hZ2VyIENv
 # ZGUgU2lnbmluZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKaLCNs9
@@ -2598,28 +2720,28 @@ try {
 # zJZA9P2DMYIFADCCBPwCAQEwNTAhMR8wHQYDVQQDDBZMRE1hbmFnZXIgQ29kZSBT
 # aWduaW5nAhAdvw47Vfsyt0KUpgcDkfFbMAkGBSsOAwIaBQCgeDAYBgorBgEEAYI3
 # AgEMMQowCKACgAChAoAAMBkGCSqGSIb3DQEJAzEMBgorBgEEAYI3AgEEMBwGCisG
-# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMCMGCSqGSIb3DQEJBDEWBBRZW8MZ+0EJ
-# P7ocvauBYLASvPKA8jANBgkqhkiG9w0BAQEFAASCAQCAxJyJdICHyaVamUtZyg6D
-# KwvNzUnrHf/Rzluk0A1v/DurkW7+HwmcjaGzRc+mDw8xCvKBvzHJ0jraBu2d3/GK
-# UUe4phHRlbDYm7/aKNWh4rectopfC2LqQR1gMRawF9M5ZEjrrytJJ5f+p78UhvsV
-# bIkMTA9rTvZTtIlzxkTticdyPQwloNQ1H4MMtq1pPR3NdtJkMgnN1kr20fcBtQ5A
-# HBSyXrIR+dQzgBfMB2NNSPbSQSepLbnP3OLXPgTviqn0fq8+mVTZmCFfyJhpoY7Z
-# qHDOoHc0CIxJFIpfz8KSzICjw/V1o7rGn2Jpae0ys6/oEwKdaRlJ0ZOXjijr2DsO
+# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMCMGCSqGSIb3DQEJBDEWBBT6SjeEKMsm
+# 4QZINVLdX9S3FLe62jANBgkqhkiG9w0BAQEFAASCAQAi/VEuzmZQu2alclvoy5qK
+# pHCUNCFuPZOT05t/CroiMK+cG+qkJCz86KQwVLAlfWhnMgwOv7vTgG1/MUAogJ0k
+# hk0wPy5CRes0/yTq/PN6Ab1e8a7klGPd+vfuqTMfNa1iuqBjQCnvnDvbA69mjo1V
+# 1FrqDBIV3E2CMUVsRoJMUpPP/zr1LWCrbKKT7oUuryoOP3MLYnhwsJWO5vwQ/xD3
+# 0XYVWTCgYQLyBXRuI+QteMvM1GM/YYVBNMx2/DlEf446/enidywTPlClWRj8+I1o
+# R5QDn2gbzyizlyC6e5UCjxxNCP7lJIUv04jq70HMExNEMXVIojln3YUQmT7kWbm0
 # oYIDJjCCAyIGCSqGSIb3DQEJBjGCAxMwggMPAgEBMH0waTELMAkGA1UEBhMCVVMx
 # FzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMUEwPwYDVQQDEzhEaWdpQ2VydCBUcnVz
 # dGVkIEc0IFRpbWVTdGFtcGluZyBSU0E0MDk2IFNIQTI1NiAyMDI1IENBMQIQCE/c
 # M09+RU7bww+P+ZIYNTANBglghkgBZQMEAgEFAKBpMBgGCSqGSIb3DQEJAzELBgkq
-# hkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2MDkzMDExNTkzN1owLwYJKoZIhvcN
-# AQkEMSIEIEgqdbMq3Hx0iNan/Bs+Zh1C5WpKKQGvg3tFWC1ANuC6MA0GCSqGSIb3
-# DQEBAQUABIICAEmdNYPK79+Keoi4VNJxCy6qIUstDHJuW5EOxJsgfTxZQbY5Ve2i
-# 9XwT5r59qZzQGJ2w4BWVmQ501Au+l89+VMMIEDDUxncu07EXDF5GLEQtGC7vjfrT
-# LV/RVxeziTLPWOrxcTz4KrSSdGa7AedKG8wlk4nD+BWY93GAmmPt7ivyRyRPGQkX
-# RCUUdeY0s4bEdlGb2v46omdkuVLIk8+SGUdTRAe1e4zTOd1lLTg2a5cAEK63UAMe
-# xD2VuL/OUWNQ+wtvIyQ2QAN+znWMl2w/hZOfiMV/rRgfL6SXvWwEzYltUTMD2ese
-# 3PDaSFORX3J3JD61I+PtmHvnQeZx2A2iBdCIQqoPhWy/WTS59BMJhMRH6W1n6973
-# H+G4BC65km5WF0dj1r2AevqVrx9ou1xYqoMZgJ5QHmdKwPUZ1biHIZWQRoZo2Tm5
-# 1p9zBkQMF5X3oGCx5z/ZRxkiWiIqa7DRqPNhvFyxWf5BFqDcvRBDxJWcmzQBISdU
-# hoAN75aIbtcDQWML8avTupuduXEZ6rOIRXBws4L6Yrdjq0r5/hRu76uff+nQKUWE
-# ixw5tm80wzGhJKPiSxaaurc6x69cc7l+be3G4k/aoJTC2oZaRZObQn2D4FSvSQ2f
-# MOScAJWL0v2Mfmv/mOE1LurzTAZWyjFtkry3LstvcoAf0NJfKsYQIAKe
+# hkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2MDkzMDEyMjIyMlowLwYJKoZIhvcN
+# AQkEMSIEIH4gmZzXkZZEig+Tqhft6MMLDS1aDphkWgd6CTl30l8sMA0GCSqGSIb3
+# DQEBAQUABIICAAGrEuQxf/K+OCu7vjYX9sbdPE9rcsN4N0+/09Kh26BUbFkzUYGr
+# tOhfqOfsI6ASSxR6gt2IQ5rgviv4dyoQE4jFby/T3AEd5Z4DkKntnGiiAxVfn9bw
+# cs5CCgyWklKO20EcRP4LqfmU2b03jrDRkjSZ9Fm03/SbgyLb3D/f0rU5FjWyR6/Z
+# yACXd5IIX3XyS/52H0WM5AJw9cvpDyaxJ/z3IiO3hKJiqWUeyIDqyVPrArF7TF7W
+# 5Q8e5CqVN+aPrSVnn6KMM1p4vaYiU1Pg7ibMW/SrX3QN3FpeF484rNbFvNwbBRjD
+# TXA0F5qp10Dle/hmA0QKcdQdsyJlO1R4igwkV/JNDc998ktmcIdcDLI2gwA3AaKI
+# CBStug+YZ8O9cUAB/qADfHg9Il/eg0FMGUym8gFmhPPu1z1RK1K5QdZodaBmB9bO
+# bG+RwxI1Ri/tGuSB7S83UKgeSdldF9jahhTbBD9I/Bw6KJH3Fk38Za04vhymDnQa
+# 6VEQ/VJovy4hYGBFjCaprlXzgZYRerKUhDHVQyQUU9QqTMSu1c9bdBhAaC5/pM3c
+# fOU5eLFWZmsyKFEy6lmFC7sK+Xhku9uBLh5oeDn1IL1qpN51bL8CcCPOFQuk0H/w
+# YWI5WMf302+eqRHwZW1xr3kC1wQEdFPsPNfeatDk0tszQI7cjZ5/bW23
 # SIG # End signature block
