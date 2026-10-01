@@ -1722,12 +1722,18 @@ function Show-BulkMenu {
 function Show-LdLogFiles {
     if (-not $script:LdPath) { Write-Fail 'ldconsole не найден.'; Wait-Enter; return }
     $base = Split-Path $script:LdPath -Parent
-    $logDirs = @((Join-Path $base 'logs'), (Join-Path $base 'vms\leidian0'))
+    # LDPlayer 9: папка logs\ ; LDPlayer 14: log\ ; плюс папки инстансов vms\leidianN\
+    $logDirs = @((Join-Path $base 'logs'), (Join-Path $base 'log'))
+    $vmsRoot = Join-Path $base 'vms'
+    if (Test-Path $vmsRoot) {
+        $logDirs += @(Get-ChildItem $vmsRoot -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+    }
     $files = @()
     foreach ($d in $logDirs) {
         if (Test-Path $d) { $files += Get-ChildItem $d -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.(log|txt)$' } }
     }
-    if ($files.Count -eq 0) { Write-Note 'Лог-файлы не найдены в папке установки LDPlayer.'; Wait-Enter; return }
+    $files = @($files | Sort-Object LastWriteTime -Descending)
+    if ($files.Count -eq 0) { Write-Note 'Лог-файлы не найдены. Искал *.log/*.txt в logs\, log\ и подпапках vms\ внутри установки LDPlayer.'; Wait-Enter; return }
 
     for ($i = 0; $i -lt $files.Count; $i++) {
         Write-Host ("  [{0}] {1} ({2} KB, {3})" -f ($i+1), $files[$i].FullName, [int]($files[$i].Length/1KB), $files[$i].LastWriteTime)
@@ -2666,7 +2672,7 @@ function Show-LogsMenu {
     while ($true) {
         Show-Banner
         Write-Title 'Логи'
-        Write-Host '  [1] Файлы логов LDPlayer (logs\*.log)'
+        Write-Host '  [1] Файлы логов LDPlayer (logs\, log\, vms\)'
         Write-Host '  [2] adb logcat (снапшот / live / фильтры)'
         Write-Host ''
         Write-Host '  [0] Назад'
@@ -2765,8 +2771,8 @@ try {
 # SIG # Begin signature block
 # MIIb5gYJKoZIhvcNAQcCoIIb1zCCG9MCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUTZlRmVrNaYp9mgTjT4Bl+Dsh
-# d5CgghZQMIIDEjCCAfqgAwIBAgIQHb8OO1X7MrdClKYHA5HxWzANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUNH6a6kRWlTV5J8bITtb2Ziz5
+# wxygghZQMIIDEjCCAfqgAwIBAgIQHb8OO1X7MrdClKYHA5HxWzANBgkqhkiG9w0B
 # AQsFADAhMR8wHQYDVQQDDBZMRE1hbmFnZXIgQ29kZSBTaWduaW5nMB4XDTI2MDkz
 # MDExNDMzNFoXDTI5MDkzMDExNTMzNFowITEfMB0GA1UEAwwWTERNYW5hZ2VyIENv
 # ZGUgU2lnbmluZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKaLCNs9
@@ -2888,28 +2894,28 @@ try {
 # zJZA9P2DMYIFADCCBPwCAQEwNTAhMR8wHQYDVQQDDBZMRE1hbmFnZXIgQ29kZSBT
 # aWduaW5nAhAdvw47Vfsyt0KUpgcDkfFbMAkGBSsOAwIaBQCgeDAYBgorBgEEAYI3
 # AgEMMQowCKACgAChAoAAMBkGCSqGSIb3DQEJAzEMBgorBgEEAYI3AgEEMBwGCisG
-# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMCMGCSqGSIb3DQEJBDEWBBTRVbbBw05h
-# AscrHnLuecfPcGEMJjANBgkqhkiG9w0BAQEFAASCAQBg79StfcCbzWRsl1w9bt5q
-# FDKhfs2qQPzGxMhzs+RlOfGGQBFyrbstlr3NLXjWW+HmtfgzBpWXkt3Mu98ZHvBa
-# ZEjwASrN3pnIs2rH49Smxe1vujeDpbtHO++uzTTsDC32+Iq8zgh5LH/Q4v6TCOIH
-# QSGHDhEsG3etrgHqD6tOzE6yne5YNab3pIqTWW3w4fpK4IOCuH9Psw+GqJgAlwV5
-# KKy9EiGN2AXwkc5fB586Ba32Tp5kl3NgOHBBu6IL9uJ3seCdRIJmCKPSDAQfTZAx
-# 4I+xIZS8XRuJnHt+fNDc27DFgD8kJauGmAMhx2pTpHuBvIwoqfhpo/6yixIB65oW
+# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMCMGCSqGSIb3DQEJBDEWBBQiZzQ04Tkw
+# NsUURK3+qqtJ8VNGtDANBgkqhkiG9w0BAQEFAASCAQBoRoBdSc3r8V9Yr/TZNMMl
+# 4PdRt27IAkpgucRQibWuXKrWOBy1v0At1o5nZY7CSipprQ9bszviE3GOl4vzOsAm
+# Zg8O2bh26+guLTsPExarnO+o577tLyGXN2VYQ6aEl0C51dXvN0ccW9ZJNwg86/Lf
+# IfwypH4t3aPwF/hyWdEUN/yzFmy6fKrUt98+p752Vm+fsjyf9hX6+De/qrHrUxEk
+# k3Hl6cY29Fb5+0qXze+l4iKSkmUt+fdgKszOAtuZi5E5XS1NqFj6m5AVsFlCEQM1
+# qz+n2ywLKUVzvU4C+lQRtIrwEjDCIgm3bLq9DRQN2GDOahXRPm3z7k74leyVqrmh
 # oYIDJjCCAyIGCSqGSIb3DQEJBjGCAxMwggMPAgEBMH0waTELMAkGA1UEBhMCVVMx
 # FzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMUEwPwYDVQQDEzhEaWdpQ2VydCBUcnVz
 # dGVkIEc0IFRpbWVTdGFtcGluZyBSU0E0MDk2IFNIQTI1NiAyMDI1IENBMQIQCE/c
 # M09+RU7bww+P+ZIYNTANBglghkgBZQMEAgEFAKBpMBgGCSqGSIb3DQEJAzELBgkq
-# hkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2MTAwMTA1MjgwOFowLwYJKoZIhvcN
-# AQkEMSIEILwIrw2W4+5vZ+XqtW8QStdQnUGknRJeM2kw9epMG8AwMA0GCSqGSIb3
-# DQEBAQUABIICAFBtSp72y/nF7oaERebY8yu96p9LLko2pflIn0Ep7KzMSEGKRPof
-# Z6ivEQ87OxS6Sp1FvlqW3bjofAmYVzTJLs/ReYb4ebfPW2mYFYRhTFEqi96rtTQS
-# j5zDotD1gIQSRfdOdfjJOWbrEmsHuardRsFZgi8EX58ntHOnmVYmfAubgkgGHwR+
-# BBcnz4NFQKTN5NKkjeYUcoXILHJ7yX7AJoFCdn5nnaVTrH+gdOklrSV5u7aAvznJ
-# cgVwBuj13goO1cZIMdBoiI2vMuYg+3Cxy8+M85S3/v+Ecty/QY9a5Sv5yTNPppUR
-# JVm91eXU0AzOPHHy5WPdFraYSRQwFnT83uaIHm+3vc6U3J2ZoeIO4Ddz15a5lCrZ
-# 5qVnXc1aaSBr1u2B/QVGIPj889PwEI6MExwZpxiz/431bJ1CM2JA+VkjRr692Asb
-# vE9gpX6tqAiRtL2gsVthCaCCAPrjaZVvBMkyIXW26py+45KuJ0rvJA6G+aomxtdp
-# v0j72GZlldxAwN1L/xsHFF2x+eEU3pI/SeLsP1AKhUbpDJ7qle92R6CUn5GGcJIu
-# 81+9WtwVdWjpoNrwJ31vmajKr34AVzkPJpCpEOfIS5VqNTae3uVqEb8yLkYGETzE
-# ZmEE3kGSGNlGiIMIjg2GDoDcpOkc6VOtdFNjYb4zlKKiD+SOy+QHGs2O
+# hkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2MTAwMTA1MzcwM1owLwYJKoZIhvcN
+# AQkEMSIEILmR2AJorRocTg2bHx4/DICQf8Kw+uKwnO2EzsVlRCqSMA0GCSqGSIb3
+# DQEBAQUABIICAAr0MATxxfdvhUp/ulY6iopuiL4JY9IOvTir3o+VFMF0VtWTLN80
+# T4r53TbJpinu62DtCLlb08Sb9EzV/f/ZTqsli9FhU6WYhmdx8yl2LUlPat3vbYw3
+# WSw698Yw3mZncwX/LKH6uZh9O7l89/L7RPTZTRL9UXxpm5P1ZSMdP4n0YBkWP7PW
+# BveL1nKNH8Ng0dp+9o69EqgbMXgH2JxIgCUC8ard+60hZ3nBxCaqy12BOikr+tsi
+# sGWYChIBCRAA+l3GMKK+x0IuCqjqWVYl7a5LJvZ/cw9U5NZafrB2sPf/CV/2Wkv8
+# H8fnqmofhJRPKQKlGbA9VhkKGaR2Dv10db85srtcDs9/r90x9RoCy5Z4qjLxuw9D
+# 2AK2cElo2USNR/KENDMP9Ul/jWNPonjevQPSU4DZwAGs0nCx4D1es/edyx29xG+H
+# 7FQEeghFA6FVwAVVhX9uRHhxw4QkMtUk5+iw4Yo2SrxlOWwi9evVhGMe0jRa12gF
+# 3riARnyHDRsUjafZOF8v/KgjHIk7KNOjfIlmyffziblM9rUP7lQialS3DwHl/nLg
+# o5g70m1DIyowksGEPgvdZaTUJLctVfOk2ppBXWnttKz/WmJlHmpoe7xQGmWOxqRP
+# 09Ey6O9Y6wgkDPVbrXjOS08hHGD7S53kQmB2ufxNWmq2K+vXXI0kLxHX
 # SIG # End signature block
