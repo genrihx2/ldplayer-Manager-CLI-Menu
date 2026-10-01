@@ -49,7 +49,11 @@ Set-Location -LiteralPath $root
 
 function Invoke-Git {
     param([Parameter(Mandatory)][string[]]$Arguments)
-    $out = & git @Arguments 2>&1
+    # PS 5.1 + EAP=Stop: любой stderr git (даже безобидное "warning: LF will be replaced by CRLF")
+    # становится завершающей ошибкой — глушим EAP на время вызова и судим по $LASTEXITCODE.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $out = & git @Arguments 2>&1 } finally { $ErrorActionPreference = $prevEap }
     if ($LASTEXITCODE -ne 0) {
         throw ("git {0}`n{1}" -f ($Arguments -join ' '), ($out -join [Environment]::NewLine))
     }
