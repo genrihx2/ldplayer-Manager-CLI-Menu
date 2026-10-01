@@ -1,57 +1,94 @@
 name: Release
 
-# Автоматический черновик релиза при пуше тега v*.
+# Автоматическая ПУБЛИКАЦИЯ релиза при пуше тега v* — без черновика и ручной кнопки.
 # Заметки берутся из RELEASE_NOTES_<тег>.md (например RELEASE_NOTES_v2.0.1.md);
-# если файла нет, GitHub сгенерирует их сам (--generate-notes).
-# Релиз создаётся как draft: проверьте описание и нажмите Publish вручную.
+# если файла нет — генерируются из коммитов с предыдущего тега.
+# Ручной запуск (Actions → Release → Run workflow, указать тег) публикует или
+# обновляет релиз для этого тега: так можно опубликовать и ранее созданный
+# черновик (draft: false по умолчанию переводит черновик в опубликованный).
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Тег релиза (например v2.0.1). Пусто — тег, на котором запущен воркфлоу.'
+        required: false
+        default: ''
 
 permissions: {}
 
 jobs:
-  draft-release:
+  publish-release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Resolve tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Extract version from tag
-        id: ver
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify tag exists
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::Тег ${TAG} не существует в репозитории"
+            exit 1
+          fi
 
       - name: Build release zip
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          zip -j "LDManager-${{ steps.ver.outputs.version }}.zip" \
+          zip -j "LDManager-${TAG#v}.zip" \
             LDManager.ps1 LDManager.core.ps1 LD.Sieve.ps1 README.md LICENSE
 
-      - name: Resolve release notes file
+      - name: Resolve release notes
         id: notes
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          tag="${GITHUB_REF_NAME}"
-          if [ -f "RELEASE_NOTES_${tag}.md" ]; then
-            echo "file=RELEASE_NOTES_${tag}.md" >> "$GITHUB_OUTPUT"
+          if [ -f "RELEASE_NOTES_${TAG}.md" ]; then
+            echo "file=RELEASE_NOTES_${TAG}.md" >> "$GITHUB_OUTPUT"
           else
-            echo "file=" >> "$GITHUB_OUTPUT"
+            # Заметки из коммитов с предыдущего тега; если предыдущего тега нет — последние 15 коммитов.
+            prev=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+            {
+              echo "## LDManager ${TAG}"
+              echo
+              if [ -n "$prev" ]; then
+                git log --pretty=format:'- %s (%h)' "${prev}..${TAG}"
+              else
+                git log --pretty=format:'- %s (%h)' -15 "${TAG}"
+              fi
+              echo
+            } > release_notes.md
+            echo "file=release_notes.md" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create draft release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NOTES_FILE: ${{ steps.notes.outputs.file }}
-          VERSION: ${{ steps.ver.outputs.version }}
-        run: |
-          tag="${GITHUB_REF_NAME}"
-          args=("$tag" --draft --title "LDManager $tag" --verify-tag)
-          if [ -n "$NOTES_FILE" ]; then
-            args+=(--notes-file "$NOTES_FILE")
-          else
-            args+=(--generate-notes)
-          fi
-          args+=("LDManager-$VERSION.zip")
-          gh release create "${args[@]}"
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: LDManager ${{ steps.tag.outputs.tag }}
+          draft: false
+          prerelease: false
+          body_path: ${{ steps.notes.outputs.file }}
+          files: LDManager-*.zip
+          fail_on_unmatched_files: true
