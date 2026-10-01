@@ -59,6 +59,15 @@ jobs:
           zip -j "LDManager-${TAG#v}.zip" \
             LDManager.ps1 LDManager.core.ps1 LD.Sieve.ps1 README.md LICENSE
 
+      - name: Generate SHA256SUMS
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          # Проверка целостности скачивания: CertUtil -hashfile LDManager-<версия>.zip SHA256
+          # в Windows, shasum -a 256 -c SHA256SUMS на Linux/macOS.
+          sha256sum "LDManager-${TAG#v}.zip" > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Resolve release notes
         id: notes
         env:
@@ -90,5 +99,7 @@ jobs:
           draft: false
           prerelease: false
           body_path: ${{ steps.notes.outputs.file }}
-          files: LDManager-*.zip
+          files: |
+            LDManager-*.zip
+            SHA256SUMS
           fail_on_unmatched_files: true
