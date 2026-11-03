@@ -48,7 +48,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 # Версия и репозиторий
 # ---------------------------------------------------------------------------
-$script:ScriptVersion = '2.0.6'
+$script:ScriptVersion = '2.0.7'
 $script:RepoOwner   = 'genrihx2'
 $script:RepoName    = 'ldplayer-Manager-CLI-Menu'
 $script:RepoBranch  = 'main'
@@ -2214,6 +2214,20 @@ function Get-ReleaseTag {
     return $script:RepoBranch
 }
 
+function Get-UpdateDownloadRef {
+    # Ref, с которого качаются файлы обновления. Обязан совпадать с релизом,
+    # чей SHA256SUMS мы сверяем: иначе честные хеши не сойдутся и обновление
+    # упадёт. Если манифеста нет или GitHub считает latest'ом ПРОШЛЫЙ релиз
+    # (так вышло с v2.0.5, опубликованным позже v2.0.6), берём ветку main —
+    # в ней актуальный код, а не откат на старую версию.
+    if (-not $script:ChecksumReleaseTag) { return $script:RepoBranch }
+    $tagVersion = $script:ChecksumReleaseTag -replace '^v', ''
+    try {
+        if ([version]$tagVersion -lt [version]$script:ScriptVersion) { return $script:RepoBranch }
+    } catch { return $script:RepoBranch }
+    return $script:ChecksumReleaseTag
+}
+
 function Get-RemoteScriptVersion {
     # Версия задаётся в LDManager.core.ps1 (строка $script:ScriptVersion = 'X.Y.Z'),
     # поэтому читаем именно ядро, а не точку входа LDManager.ps1.
@@ -2283,6 +2297,7 @@ function Get-ReleaseChecksumManifest {
     # Возвращает $null, если манифеста нет (старые релизы) или он не читается;
     # тогда сверка не выполняется, но само обновление продолжает работать.
     $script:LastChecksumError = $null
+    $script:ChecksumReleaseTag = $null
     $release = Get-LatestReleaseInfo
     if (-not $release) { $script:LastChecksumError = 'не удалось получить данные о последнем релизе'; return $null }
 
@@ -2386,6 +2401,8 @@ function Test-FileIntegrity {
     }
     if ($script:ChecksumReleaseTag) { Write-Host "  Манифест релиза    : $($script:ChecksumReleaseTag)" }
     Write-Host "  Ожидаемые хеши   : SHA256SUMS (ассет последнего релиза)"
+    # Сверяем то, что отдаёт GitHub, с манифестом ТОГО ЖЕ релиза.
+    $ref = if ($script:ChecksumReleaseTag) { $script:ChecksumReleaseTag } else { $script:RepoBranch }
     Write-Host ''
 
     $files = @('LDManager.ps1', 'LDManager.core.ps1', 'LD.Sieve.ps1')
@@ -2400,7 +2417,7 @@ function Test-FileIntegrity {
                 $missed++; continue
             }
             try {
-                $remote = Get-RemoteScriptFile -Name $f -Ref $script:ReleaseTag -TempDir $tmpDir
+                $remote = Get-RemoteScriptFile -Name $f -Ref $ref -TempDir $tmpDir
             } catch {
                 $code = Get-HttpErrorStatusCode $_
                 Write-Host ("  {0,-20} не скачан ({1})" -f $f, $(if ($code) { "HTTP $code" } else { $_.Exception.Message })) -ForegroundColor Red
@@ -2484,6 +2501,9 @@ function Update-LDManagerSelf {
     Write-Host ''
     Write-Host '  Проверка целостности по манифесту SHA256SUMS...'
     $manifest = Get-ReleaseChecksumManifest
+    $ref = Get-UpdateDownloadRef
+    # Сверка возможна, только если качаем с того же релиза, что дал манифест.
+    $verify = ($manifest -and $ref -eq $script:ChecksumReleaseTag)
     if ($manifest) {
         Write-Ok "Манифест загружен (релиз $($script:ChecksumReleaseTag))."
     } else {
@@ -2508,10 +2528,10 @@ function Update-LDManagerSelf {
         $staged = @{}
         $mismatch = @()
         foreach ($f in $files) {
-            $remote = Get-RemoteScriptFile -Name $f -Ref $script:ReleaseTag -TempDir $tmpDir
-            $expected = if ($manifest) { $manifest[$f] } else { $null }
+            $remote = Get-RemoteScriptFile -Name $f -Ref $ref -TempDir $tmpDir
+            $expected = if ($verify) { $manifest[$f] } else { $null }
             if (-not $expected) {
-                Write-Host ("  {0,-20} {1}" -f $f, $(if ($manifest) { 'нет в манифесте - без сверки' } else { 'без сверки (нет манифеста)' }))
+                Write-Host ("  {0,-20} {1}" -f $f, $(if ($verify) { 'нет в манифесте - без сверки' } elseif ($manifest) { 'без сверки (манифест от другого релиза)' } else { 'без сверки (нет манифеста)' }))
             } elseif ($remote.Hash -eq $expected) {
                 Write-Host ("  {0,-20} хеш ОК" -f $f) -ForegroundColor Green
             } else {
@@ -2526,7 +2546,7 @@ function Update-LDManagerSelf {
         if ($mismatch.Count -gt 0) {
             Write-Host ''
             Write-Fail "Сверка не пройдена: $($mismatch.Count) файл(ов). Запись отменена, файлы на диске не тронуты."
-            Write-Note 'Манифест снят с последнего РЕЛИЗА, а обновление качает ветку main.'
+            Write-Note "Манифест снят с релиза $($script:ChecksumReleaseTag), файлы качались из '$ref'."
             Write-Note 'Если main опережает последний релиз, расхождение законно — обновитесь с опубликованного релиза.'
             Write-Note 'Резервная копия: ' + $backupDir
             Wait-Enter; return

@@ -447,6 +447,28 @@ Describe 'Целостность: разбор манифеста SHA256SUMS' {
     }
 }
 
+Describe 'Целостность: выбор ref для скачивания' {
+    BeforeEach {
+        $script:ChecksumReleaseTag = $null
+        $script:RepoBranch = 'main'
+    }
+
+    It 'манифест от релиза текущей версии -> качаем по тегу' {
+        $script:ChecksumReleaseTag = "v$($script:ScriptVersion)"
+        Get-UpdateDownloadRef | Should -Be "v$($script:ScriptVersion)"
+    }
+
+    It 'релиз старее локальной версии -> качаем ветку, а не откат на старую версию' {
+        # Реальный случай: GitHub считал latest'ом v2.0.5, хотя локально уже 2.0.6.
+        $script:ChecksumReleaseTag = 'v1.0.0'
+        Get-UpdateDownloadRef | Should -Be 'main'
+    }
+
+    It 'манифеста нет -> качаем ветку' {
+        Get-UpdateDownloadRef | Should -Be 'main'
+    }
+}
+
 Describe 'Целостность: хеши и нормализация содержимого' {
     It 'Get-BytesHash совпадает с Get-FileHash для тех же байтов' {
         $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("ldm_t_" + [guid]::NewGuid().ToString('N') + '.bin')
