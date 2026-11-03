@@ -356,3 +356,131 @@ Describe 'GitHub: причины ошибок проверки обновлен�
         $script:LastUpdateCheckError | Should -BeNull
     }
 }
+
+Describe 'Целостность: разбор манифеста SHA256SUMS' {
+    BeforeEach {
+        $script:LastChecksumError = $null
+        $script:ChecksumReleaseTag = $null
+    }
+
+    It 'строки sha256sum разбираются в карту имя->хеш' {
+        Mock Get-LatestReleaseInfo {
+            return [pscustomobject]@{
+                tag_name = 'v9.9.9'
+                assets = @([pscustomobject]@{ name = 'SHA256SUMS'; browser_download_url = 'https://x/SHA256SUMS' })
+            }
+        }
+        $hex = ('ab' * 32)
+        Mock Invoke-WebRequest { return [pscustomobject]@{ Content = "$hex  LDManager.ps1`n" } }
+        $m = Get-ReleaseChecksumManifest
+        $m | Should -Not -BeNull
+        $m['LDManager.ps1'] | Should -Be $hex
+        $script:ChecksumReleaseTag | Should -Be 'v9.9.9'
+    }
+
+    It 'путь с каталогом и префиксом * распознаётся по имени файла' {
+        Mock Get-LatestReleaseInfo {
+            return [pscustomobject]@{
+                tag_name = 'v9.9.9'
+                assets = @([pscustomobject]@{ name = 'SHA256SUMS'; browser_download_url = 'https://x/SHA256SUMS' })
+            }
+        }
+        $hex = ('cd' * 32)
+        Mock Invoke-WebRequest { return [pscustomobject]@{ Content = "$hex *dist/LDManager.ps1`n" } }
+        $m = Get-ReleaseChecksumManifest
+        $m['LDManager.ps1'] | Should -Be $hex
+    }
+
+    It 'в релизе без SHA256SUMS -> null с внятной причиной' {
+        Mock Get-LatestReleaseInfo { return [pscustomobject]@{ tag_name = 'v1.0.0'; assets = @() } }
+        $m = Get-ReleaseChecksumManifest
+        $m | Should -BeNull
+        $script:LastChecksumError | Should -Match 'SHA256SUMS'
+    }
+
+    It 'нечитаемый манифест -> null, обновление продолжает работать без сверки' {
+        Mock Get-LatestReleaseInfo {
+            return [pscustomobject]@{
+                tag_name = 'v1.0.0'
+                assets = @([pscustomobject]@{ name = 'SHA256SUMS'; browser_download_url = 'https://x/SHA256SUMS' })
+            }
+        }
+        Mock Invoke-WebRequest { throw 'boom' }
+        Mock Get-HttpErrorStatusCode { return $null }
+        $m = Get-ReleaseChecksumManifest
+        $m | Should -BeNull
+        $script:LastChecksumError | Should -Not -BeNullOrEmpty
+    }
+
+    It 'ассет как массив байт (octet-stream) разбирается так же, как строка' {
+        # Реальный регресс: GitHub отдаёт SHA256SUMS как application/octet-stream,
+        # Invoke-WebRequest возвращает в .Content byte[], и регулярное выражение
+        # видело «97 100 98 ...» - манифест не распознавался.
+        Mock Get-LatestReleaseInfo {
+            return [pscustomobject]@{
+                tag_name = 'v1.2.3'
+                assets = @([pscustomobject]@{ name = 'SHA256SUMS'; browser_download_url = 'https://x/SHA256SUMS' })
+            }
+        }
+        $hex = ('ef' * 32)
+        # Тело Mock выполняется вне локальной области It, поэтому байты кладём
+        # в script-скоуп — иначе $body было бы $null и тест падал бы вр��де.
+        $script:manifestBytesBody = [System.Text.Encoding]::UTF8.GetBytes("$hex  LDManager.ps1`n")
+        Mock Invoke-WebRequest { return [pscustomobject]@{ Content = $script:manifestBytesBody } }
+        $m = Get-ReleaseChecksumManifest
+        $m | Should -Not -BeNull
+        $m['LDManager.ps1'] | Should -Be $hex
+        $script:ChecksumReleaseTag | Should -Be 'v1.2.3'
+    }
+
+    It 'мусор вместо манифеста -> null, а не пустая карта' {
+        Mock Get-LatestReleaseInfo {
+            return [pscustomobject]@{
+                tag_name = 'v1.0.0'
+                assets = @([pscustomobject]@{ name = 'SHA256SUMS'; browser_download_url = 'https://x/SHA256SUMS' })
+            }
+        }
+        Mock Invoke-WebRequest { return [pscustomobject]@{ Content = "ничего полезного`n" } }
+        $m = Get-ReleaseChecksumManifest
+        $m | Should -BeNull
+        $script:LastChecksumError | Should -Match 'не распознан'
+    }
+}
+
+Describe 'Целостность: хеши и нормализация содержимого' {
+    It 'Get-BytesHash совпадает с Get-FileHash для тех же байтов' {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("ldm_t_" + [guid]::NewGuid().ToString('N') + '.bin')
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes('LDManager проверка целостности')
+        [System.IO.File]::WriteAllBytes($tmp, $bytes)
+        try {
+            $expected = (Get-FileHash -Path $tmp -Algorithm SHA256).Hash.ToLower()
+            Get-BytesHash -Bytes $bytes | Should -Be $expected
+        } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'Get-BytesHash возвращает 64 hex-символа в нижнем регистре' {
+        $h = Get-BytesHash -Bytes ([System.Text.Encoding]::UTF8.GetBytes('x'))
+        $h | Should -Match '^[0-9a-f]{64}$'
+    }
+
+    It 'BOM вырезается из нормализованного содержимого' {
+        Get-PlainContent -Text ([char]0xFEFF + 'abc') | Should -BeExactly 'abc'
+    }
+
+    It 'CRLF приводится к LF' {
+        Get-PlainContent -Text "a`r`nb" | Should -BeExactly "a`nb"
+    }
+
+    It 'блок подписи вырезается, содержимое сохраняется' {
+        $signed = "код`r`n" + "# SIG # Begin signature block`r`nabc123`r`n# SIG # End signature block`r`n"
+        Get-PlainContent -Text $signed | Should -BeExactly "код`n"
+    }
+
+    It 'подписанная CRLF-копия и LF-оригинал дают одинаковое содержимое' {
+        # Ключевой инвариант сверки: у каждой копии своя подпись и свой таймстемп,
+        # поэтому сравнивать байты нельзя - только содержимое без подписи.
+        $orig = "строка 1`nстрока 2`n"
+        $copy = ($orig -replace "`n", "`r`n") + "# SIG # Begin signature block`r`nDEADBEEF`r`n# SIG # End signature block`r`n"
+        Get-PlainContent -Text $copy | Should -BeExactly $orig
+    }
+}

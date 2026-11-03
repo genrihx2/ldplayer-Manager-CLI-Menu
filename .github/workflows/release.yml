@@ -65,7 +65,24 @@ jobs:
         run: |
           # Проверка целостности скачивания: CertUtil -hashfile LDManager-<версия>.zip SHA256
           # в Windows, shasum -a 256 -c SHA256SUMS на Linux/macOS.
-          sha256sum "LDManager-${TAG#v}.zip" > SHA256SUMS
+          #
+          # Хеши .ps1 считаются НЕ из рабочей копии воркфлора, а из
+          # raw.githubusercontent.com по тегу: .gitattributes задаёт
+          # `*.ps1 text eol=crlf`, поэтому checkout на ubuntu даёт CRLF,
+          # а raw отдаёт git-блоб (LF) — это разные байты. Автообновление
+          # в LDManager качает именно raw, поэтому манифест должен совпадать
+          # с ним, иначе честная сверка всегда сообщала бы о подмене файла.
+          set -euo pipefail
+          {
+            for f in LDManager.ps1 LDManager.core.ps1 LD.Sieve.ps1; do
+              curl -fsSL -o "raw_$f" \
+                "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${TAG}/${f}"
+              h=$(sha256sum "raw_$f" | cut -d' ' -f1)
+              rm -f "raw_$f"
+              printf '%s  %s\n' "$h" "$f"
+            done
+            sha256sum "LDManager-${TAG#v}.zip"
+          } > SHA256SUMS
           cat SHA256SUMS
 
       - name: Resolve release notes

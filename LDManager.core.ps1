@@ -48,7 +48,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 # Версия и репозиторий
 # ---------------------------------------------------------------------------
-$script:ScriptVersion = '2.0.5'
+$script:ScriptVersion = '2.0.6'
 $script:RepoOwner   = 'genrihx2'
 $script:RepoName    = 'ldplayer-Manager-CLI-Menu'
 $script:RepoBranch  = 'main'
@@ -2197,10 +2197,21 @@ function Show-GithubDiagnostics {
 function Get-LatestReleaseInfo {
     try {
         $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$script:RepoOwner/$script:RepoName/releases/latest" -Headers (Get-GithubHeaders) -TimeoutSec 20
+        $r.Tag = $r.tag_name
+        $r.TagName = $r.tag_name
         return $r
     } catch {
         return $null
     }
+}
+
+function Get-ReleaseTag {
+    #Тег последнего релиза (например v2.0.5). Обновление качает по этому
+    #тегу, чтобы сверка SHA-256 не давала ложных расхождений при том, что
+    #ветка main может опережать последний опубликованный релиз.
+    $release = Get-LatestReleaseInfo
+    if ($release) { return $release.Tag }
+    return $script:RepoBranch
 }
 
 function Get-RemoteScriptVersion {
@@ -2250,42 +2261,331 @@ function Test-UpdateAvailable {
     }
 }
 
+function Get-ScriptFileStamp {
+    # Свежесть локальной копии: дата изменения самого «свежего» файла скрипта
+    # и сколько дней прошло. Показывает, какая копия реально лежит на диске.
+    $files = @('LDManager.ps1', 'LDManager.core.ps1', 'LD.Sieve.ps1')
+    $newest = $null
+    foreach ($f in $files) {
+        $p = Join-Path $scriptRoot $f
+        if (Test-Path $p) {
+            $t = (Get-Item $p).LastWriteTime
+            if (-not $newest -or $t -gt $newest) { $newest = $t }
+        }
+    }
+    if (-not $newest) { return 'нет файлов' }
+    $days = [int]((Get-Date) - $newest).TotalDays
+    return ("{0:yyyy-MM-dd HH:mm} ({1} дн. назад)" -f $newest, $days)
+}
+
+function Get-ReleaseChecksumManifest {
+    # Манифест SHA256SUMS последнего релиза: имя файла -> ожидаемый SHA-256.
+    # Возвращает $null, если манифеста нет (старые релизы) или он не читается;
+    # тогда сверка не выполняется, но само обновление продолжает работать.
+    $script:LastChecksumError = $null
+    $release = Get-LatestReleaseInfo
+    if (-not $release) { $script:LastChecksumError = 'не удалось получить данные о последнем релизе'; return $null }
+
+    $asset = @($release.assets) | Where-Object { $_.name -eq 'SHA256SUMS' } | Select-Object -First 1
+    if (-not $asset) {
+        $script:LastChecksumError = "в релизе $($release.tag_name) нет файла SHA256SUMS"
+        return $null
+    }
+
+    try {
+        $raw = (Invoke-WebRequest -Uri $asset.browser_download_url -Headers (Get-GithubHeaders) `
+                    -TimeoutSec 30 -UseBasicParsing).Content
+        # GitHub отдаёт SHA256SUMS как application/octet-stream, и Invoke-WebRequest
+        # в этом случае возвращает в .Content МАССИВ БАЙТ, а не строку. Без
+        # разбора байтов регулярное выражение видело «97 100 98 ...» и манифест
+        # не распознавался. Проверено на реальном ассете v2.0.5.
+        $text = if ($raw -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($raw) } else { [string]$raw }
+    } catch {
+        $code = Get-HttpErrorStatusCode $_
+        $script:LastChecksumError = if ($code) { "HTTP $code при загрузке SHA256SUMS" } else { $_.Exception.Message }
+        return $null
+    }
+
+    # Формат строки sha256sum: "<64 hex><пробелы><имя>".
+    $map = @{}
+    foreach ($line in ($text -split "`r?`n")) {
+        if ($line -match '^\s*([0-9a-fA-F]{64})\s+\*?(.+?)\s*$') {
+            $name = Split-Path $matches[2] -Leaf
+            if ($name) { $map[$name] = $matches[1].ToLower() }
+        }
+    }
+    if ($map.Count -eq 0) { $script:LastChecksumError = 'SHA256SUMS получен, но не распознан'; return $null }
+    $script:ChecksumReleaseTag = $release.tag_name
+    return $map
+}
+
+function Get-BytesHash {
+    # SHA-256 массива байтов (строчные hex, как в sha256sum).
+    param([byte[]]$Bytes)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return (([BitConverter]::ToString($sha.ComputeHash($Bytes))) -replace '-', '').ToLower()
+    } finally { $sha.Dispose() }
+}
+
+function Get-PlainContent {
+    # Содержимое скрипта в нормализованном виде: без BOM, без блока
+    # подписи, с едиными LF. Именно так сравниваются копии между собой.
+    #
+    # ПОЧЕМУ НЕЛЬЗЯ СВЕРЯТЬ ХЕШ ЛОКАЛЬНОГО ФАЙЛА С МАНИФЕСТОМ:
+    # в репозитории лежат ПОДПИСАННЫЕ скрипты, а блок подписи содержит
+    # метку времени подписи. Переподписав файл у себя (что делает и
+    # обновление, и пункт «Подпись»), вы получите другие байты при том же
+    # самом коде — хеш перестанет совпадать с манифестом, хотя подмены
+    # не было. Поэтому хеш сверяется у СКАЧАННОГО файла (байты из сети),
+    # а локальная копия сравнивается по содержимому без подписи.
+    param([string]$Text)
+    if ($Text.Length -gt 0 -and $Text[0] -eq [char]0xFEFF) { $Text = $Text.Substring(1) }
+    $Text = [regex]::Replace($Text, '(?s)# SIG # Begin signature block.*$', '')
+    return ($Text -replace "`r`n", "`n")
+}
+
+function Get-RemoteScriptFile {
+    # Скачивает файл из raw по указанной ветке/тегу во временный файл и
+    # возвращает объект с путём и хешем байтов ИЗ СЕТИ.
+    param(
+        [string]$Name,
+        [string]$Ref = $script:RepoBranch,
+        [string]$TempDir
+    )
+    $url = "https://raw.githubusercontent.com/$script:RepoOwner/$script:RepoName/$Ref/$Name"
+    $path = Join-Path $TempDir $Name
+    Invoke-WebRequest -Uri $url -Headers (Get-GithubHeaders) -OutFile $path -TimeoutSec 60 -UseBasicParsing
+    $bytes = [System.IO.File]::ReadAllBytes($path)
+    return [pscustomobject]@{
+        Name    = $Name
+        Path    = $path
+        Bytes   = $bytes
+        Hash    = Get-BytesHash -Bytes $bytes
+        Content = Get-PlainContent -Text ([System.Text.Encoding]::UTF8.GetString($bytes))
+    }
+}
+
+function Test-FileIntegrity {
+    # Проверка целостности: манифест последнего релиза против того, что
+    # GitHub реально отдаёт, плюс сравнение с локальной копией по
+    # содержимому (без подписи). Для каждого файла:
+    #   ОК            — скачанное совпало с манифестом
+    #   РАСХОЖДЕНИЕ   — хеш скачанного не равен заявленному в манифесте
+    #   иначе         — файла нет в манифесте (старый релиз)
+    # Сверка идёт по БАЙТАМ из сети, а не по локальному файлу: локальная
+    # копия подписана своим таймстемпом и побайтово всегда отличается.
+    [CmdletBinding()]
+    param([hashtable]$Manifest)
+
+    Write-Title 'Проверка целостности файлов (SHA-256)'
+    if (-not $Manifest) {
+        Write-Note 'Манифест SHA256SUMS недоступен — сверка не выполнена.'
+        if ($script:LastChecksumError) { Write-Note ("Причина: " + $script:LastChecksumError) }
+        Wait-Enter; return $false
+    }
+    if ($script:ChecksumReleaseTag) { Write-Host "  Манифест релиза    : $($script:ChecksumReleaseTag)" }
+    Write-Host "  Ожидаемые хеши   : SHA256SUMS (ассет последнего релиза)"
+    Write-Host ''
+
+    $files = @('LDManager.ps1', 'LDManager.core.ps1', 'LD.Sieve.ps1')
+    $bad = 0; $missed = 0; $differs = 0
+    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ldm_verify_" + [guid]::NewGuid().ToString('N'))
+    try {
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        foreach ($f in $files) {
+            $expected = $Manifest[$f]
+            if (-not $expected) {
+                Write-Host ("  {0,-20} нет в манифесте (старый релиз)" -f $f) -ForegroundColor Yellow
+                $missed++; continue
+            }
+            try {
+                $remote = Get-RemoteScriptFile -Name $f -Ref $script:ReleaseTag -TempDir $tmpDir
+            } catch {
+                $code = Get-HttpErrorStatusCode $_
+                Write-Host ("  {0,-20} не скачан ({1})" -f $f, $(if ($code) { "HTTP $code" } else { $_.Exception.Message })) -ForegroundColor Red
+                $bad++; continue
+            }
+
+            if ($remote.Hash -eq $expected) {
+                Write-Host ("  {0,-20} ОК" -f $f) -ForegroundColor Green
+            } else {
+                Write-Host ("  {0,-20} РАСХОЖДЕНИЕ" -f $f) -ForegroundColor Red
+                Write-Host ("      ожидался: {0}" -f $expected) -ForegroundColor DarkGray
+                Write-Host ("      получен : {0}" -f $remote.Hash) -ForegroundColor DarkGray
+                $bad++
+            }
+
+            # Локальная копия: сравниваем содержимое без подписи, потому что
+            # подпись у каждой копии своя (проверено на реальном v2.0.5).
+            $localPath = Join-Path $scriptRoot $f
+            if (-not (Test-Path $localPath)) {
+                Write-Host ("      локально: файл отсутствует" ) -ForegroundColor Red
+                $bad++; continue
+            }
+            $localContent = Get-PlainContent -Text ([System.IO.File]::ReadAllText($localPath))
+            if ($localContent -ceq $remote.Content) {
+                Write-Host ("      локально: совпадает с репозиторием" ) -ForegroundColor DarkGray
+            } else {
+                Write-Host ("      локально: ОТЛИЧАЕТСЯ от репозитория" ) -ForegroundColor Yellow
+                $differs++
+            }
+        }
+    } finally {
+        if (Test-Path $tmpDir) { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    Write-Host ''
+    if ($bad -eq 0) { Write-Ok "Скачанные файлы совпадают с манифестом (без манифеста: $missed)." }
+    else { Write-Fail "Файлов с несовпадением манифеста: $bad из $($files.Count)." }
+    if ($differs -gt 0) {
+        Write-Note "Локальная копия отличается от репозитория: $differs файл(ов). Вы правки вносили вручную?"
+        Write-Note 'Обновить копию: [u] Обновить LDManager.'
+    }
+    Wait-Enter
+    return ($bad -eq 0)
+}
+
 function Update-LDManagerSelf {
-    # Самообновление: скачивает все файлы скрипта из репозитория и заменяет их
+    [CmdletBinding()]
+    param([switch]$Force)
+
+    # Самообновление: скачивает все файлы скрипта из репозитория и заменяет их.
+    # -Force перекачивает файлы даже когда версия совпадает (лечит «битую» копию).
     Write-Title 'Автообновление из GitHub'
+    Write-Host ("  Локальная копия  : " + (Get-ScriptFileStamp))
+
     $check = Test-UpdateAvailable
     if ($check -eq $null) {
         Write-Fail 'Не удалось получить версию из GitHub.'
         if ($script:LastUpdateCheckError) { Write-Note ("Причина: " + $script:LastUpdateCheckError) }
+        Write-Note 'Подробнее: [g] GitHub -> [5] Диагностика доступа к GitHub.'
         Wait-Enter; return
     }
-    if (-not $check) { Write-Ok "У вас актуальная версия ($script:ScriptVersion)."; Wait-Enter; return }
+    if (-not $check) {
+        Write-Ok "У вас актуальная версия ($script:ScriptVersion)."
+        Write-Host ''
+        if (-not $Force) {
+            Write-Host '  [1] Перекачать файлы заново (лечение битой копии, подписи будут сняты)'
+            Write-Host '  [0] Назад'
+            $sub = (Read-Host 'Выбор').Trim()
+            if ($sub -ne '1') { return }
+        }
+    } else {
+        $remote = Get-RemoteScriptVersion
+        Write-Host "  Доступна версия : $remote (у вас $script:ScriptVersion)"
+    }
 
-    $remote = Get-RemoteScriptVersion
-    Write-Host "  Доступна версия: $remote (у вас $script:ScriptVersion)"
-    if (-not (Confirm-Action 'Скачать и заменить LDManager.ps1?')) { Write-Note 'Отменено.'; Wait-Enter; return }
+    if (-not (Confirm-Action 'Скачать и заменить файлы LDManager?')) { Write-Note 'Отменено.'; Wait-Enter; return }
 
-    $baseUrl = "https://raw.githubusercontent.com/$script:RepoOwner/$script:RepoName/$script:RepoBranch/"
+    # Манифест последнего релиза — по нему проверяем скачанные байты.
+    # Если манифеста нет (старый релиз), обновление всё равно выполняется,
+    # просто без сверки — с явным предупреждением, а не молча.
+    Write-Host ''
+    Write-Host '  Проверка целостности по манифесту SHA256SUMS...'
+    $manifest = Get-ReleaseChecksumManifest
+    if ($manifest) {
+        Write-Ok "Манифест загружен (релиз $($script:ChecksumReleaseTag))."
+    } else {
+        Write-Note 'Манифест SHA256SUMS недоступен — файлы будут записаны БЕЗ сверки.'
+        if ($script:LastChecksumError) { Write-Note ("Причина: " + $script:LastChecksumError) }
+    }
+
     $files   = @('LDManager.ps1', 'LDManager.core.ps1', 'LD.Sieve.ps1')
     $backupDir = Join-Path $scriptRoot ("LDManager.backup_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ldm_update_" + [guid]::NewGuid().ToString('N'))
     try {
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
         New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
         foreach ($f in $files) {
             $target = Join-Path $scriptRoot $f
             if (Test-Path $target) { Copy-Item $target (Join-Path $backupDir $f) -Force }
         }
+
+        # Шаг 1: скачать всё во временную папку и сверить хеши с манифестом.
+        # Шаг 2: записать на диск только те файлы, которые прошли сверку.
+        Write-Host ''
+        $staged = @{}
+        $mismatch = @()
+        foreach ($f in $files) {
+            $remote = Get-RemoteScriptFile -Name $f -Ref $script:ReleaseTag -TempDir $tmpDir
+            $expected = if ($manifest) { $manifest[$f] } else { $null }
+            if (-not $expected) {
+                Write-Host ("  {0,-20} {1}" -f $f, $(if ($manifest) { 'нет в манифесте - без сверки' } else { 'без сверки (нет манифеста)' }))
+            } elseif ($remote.Hash -eq $expected) {
+                Write-Host ("  {0,-20} хеш ОК" -f $f) -ForegroundColor Green
+            } else {
+                Write-Host ("  {0,-20} ХЕШ НЕ СОВПАЛ" -f $f) -ForegroundColor Red
+                Write-Host ("      ожидался: {0}" -f $expected) -ForegroundColor DarkGray
+                Write-Host ("      получен : {0}" -f $remote.Hash) -ForegroundColor DarkGray
+                $mismatch += $f
+            }
+            $staged[$f] = $remote
+        }
+
+        if ($mismatch.Count -gt 0) {
+            Write-Host ''
+            Write-Fail "Сверка не пройдена: $($mismatch.Count) файл(ов). Запись отменена, файлы на диске не тронуты."
+            Write-Note 'Манифест снят с последнего РЕЛИЗА, а обновление качает ветку main.'
+            Write-Note 'Если main опережает последний релиз, расхождение законно — обновитесь с опубликованного релиза.'
+            Write-Note 'Резервная копия: ' + $backupDir
+            Wait-Enter; return
+        }
+
+        # Шаг 2: запись. Неизменённый по СОДЕРЖИМОМУ файл не переписываем —
+        # это сохраняет его байты и подпись.
+        Write-Host ''
+        $changed = @()
         foreach ($f in $files) {
             $target = Join-Path $scriptRoot $f
-            $content = (Invoke-WebRequest -Uri ($baseUrl + $f) -Headers (Get-GithubHeaders) -TimeoutSec 60 -UseBasicParsing).Content
-            # Неизменённый файл не переписываем: сохраняем байты и подпись.
-            if ((Test-Path $target) -and ([System.IO.File]::ReadAllText($target) -ceq $content)) { continue }
+            $content = [System.Text.Encoding]::UTF8.GetString($staged[$f].Bytes)
+            if ((Test-Path $target) -and ([System.IO.File]::ReadAllText($target) -ceq $content)) {
+                Write-Host ("  {0,-20} без изменений" -f $f)
+                continue
+            }
             [System.IO.File]::WriteAllText($target, $content, (New-Object System.Text.UTF8Encoding($true)))
+            Write-Host ("  {0,-20} обновлён" -f $f) -ForegroundColor Green
+            $changed += $f
         }
-        Write-Ok "Обновлено до $remote. Резервная копия: $backupDir"
-        Write-Note 'Перезапустите скрипт, чтобы изменения вступили в силу.'
+
+        # Контроль: версия в скачанном ядре должна совпасть с объявленной.
+        $verified = $null
+        try {
+            $verified = [regex]::Match([System.IO.File]::ReadAllText((Join-Path $scriptRoot 'LDManager.core.ps1')), "\`$script:ScriptVersion\s*=\s*'([0-9\.]+)'").Groups[1].Value
+        } catch { $verified = $null }
+        if ($verified) {
+            if ($verified -eq $script:ScriptVersion) { Write-Ok "Версия в файлах: $verified (совпадает)" }
+            else { Write-Note "Внимание: в файлах версия $verified, а в памяти $($script:ScriptVersion). Требуется перезапуск." }
+        }
+
+        if ($changed.Count -eq 0) {
+            Write-Ok "Файлы уже совпадают с репозиторием. Резервная копия: $backupDir"
+        } else {
+            Write-Ok "Обновлено (файлов: $($changed.Count)). Резервная копия: $backupDir"
+        }
+        Write-Host ''
+        if (Confirm-Action 'Перезапустить LDManager сейчас?') {
+            $entry = Join-Path $scriptRoot 'LDManager.ps1'
+            if (Test-Path $entry) {
+                try {
+                    Start-Process (Get-Process -Id $PID).Path `
+                        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$entry`"") -WorkingDirectory $scriptRoot
+                    Write-Ok 'Запущен новый экземпляр. Текущий закрывается.'
+                    exit 0
+                } catch {
+                    Write-Fail "Не удалось перезапустить автоматически: $($_.Exception.Message)"
+                }
+            }
+            Write-Note 'Перезапустите скрипт вручную, чтобы изменения вступили в силу.'
+        } else {
+            Write-Note 'Перезапустите скрипт, чтобы изменения вступили в силу.'
+        }
     } catch {
         Write-Fail "Ошибка обновления: $($_.Exception.Message)"
         if (Test-Path $backupDir) { Write-Note "Резервная копия: $backupDir" }
+    } finally {
+        # Временная папка со скачанными файлами всегда убирается, даже при ошибке.
+        if ($tmpDir -and (Test-Path $tmpDir)) { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
     }
     Wait-Enter
 }
@@ -2355,48 +2655,6 @@ function Show-RepoMenu {
             '1' { Invoke-RepoClone }
             '2' { Get-RepoZip }
             '3' { Get-RepoSingleFile }
-            '0' { return }
-            'q' { return }
-            default { Write-Fail 'Неизвестный пункт меню.'; Start-Sleep -Milliseconds 500 }
-        }
-    }
-}
-
-# ===========================================================================
-# Меню GitHub (токен / автообновление / загрузка репозитория)
-# ===========================================================================
-function Show-GithubMenu {
-    while ($true) {
-        Show-Banner
-        Write-Title 'GitHub'
-        Write-Host ("  Репозиторий: https://github.com/$script:RepoOwner/$script:RepoName")
-        $t = Get-StoredGithubToken
-        Write-Host ("  Токен      : " + $(if ($t) { 'сохранён (DPAPI)' } else { 'не задан' }))
-        Write-Host ''
-        Write-Host '  [1] Менеджер GitHub-токена (DPAPI)'
-        Write-Host '  [2] Проверить обновления'
-        Write-Host '  [3] Автообновление скрипта из GitHub'
-        Write-Host '  [4] Загрузка репозитория (clone / ZIP / файл)'
-        Write-Host '  [5] Диагностика доступа к GitHub'
-        Write-Host ''
-        Write-Host '  [0] Назад'
-        $c = (Read-Host 'Выбор').Trim()
-        switch ($c) {
-            '1' { Show-GithubTokenMenu }
-            '2' {
-                $upd = Test-UpdateAvailable
-                if ($upd -eq $null) {
-                    Write-Fail 'Не удалось проверить обновления.'
-                    if ($script:LastUpdateCheckError) { Write-Note ("Причина: " + $script:LastUpdateCheckError) }
-                    Write-Note 'Подробнее: [5] Диагностика доступа к GitHub.'
-                }
-                elseif ($upd)       { Write-Note 'Доступна новая версия! Используйте «Автообновление».' }
-                else                { Write-Ok "У вас актуальная версия ($script:ScriptVersion)." }
-                Wait-Enter
-            }
-            '3' { Update-LDManagerSelf }
-            '4' { Show-RepoMenu }
-            '5' { Show-GithubDiagnostics }
             '0' { return }
             'q' { return }
             default { Write-Fail 'Неизвестный пункт меню.'; Start-Sleep -Milliseconds 500 }
@@ -2479,6 +2737,8 @@ function Show-VersionInfo {
     Show-Banner
     Write-Title 'Информация о версиях'
     Write-Host ("  LDManager          : v$script:ScriptVersion")
+    Write-Host ("  Файлы обновлены    : " + (Get-ScriptFileStamp))
+    Write-Host ("  Папка скрипта      : $scriptRoot")
     Write-Host ("  Репозиторий        : https://github.com/$script:RepoOwner/$script:RepoName")
 
     $ldVer = $null
@@ -2635,6 +2895,7 @@ function Show-MainMenu {
         Write-Host '  [8] Окна - показать/скрыть/расставить'
         Write-Host '  [9] Массовые операции - все инстансы'
         Write-Host '  [b] Резервные копии - backup/restore (.ldbk)'
+        Write-Host '  [u] Обновить LDManager - проверка и загрузка свежей версии'
         Write-Host '  [g] GitHub - токен (DPAPI), автообновление, загрузка репозитория'
         Write-Host '  [s] Подпись скрипта (self-signed CodeSigning)'
         Write-Host '  [v] Информация о версиях'
@@ -2654,6 +2915,7 @@ function Show-MainMenu {
             '8' { Show-WindowsMenu }
             '9' { Show-BulkMenu }
             'b' { Show-BackupMenu }
+            'u' { Update-LDManagerSelf }
             'g' { Show-GithubMenu }
             's' { Invoke-ScriptSigning }
             'v' { Show-VersionInfo }
@@ -2703,6 +2965,7 @@ function Show-GithubMenu {
         Write-Host '  [3] Автообновление скрипта из GitHub'
         Write-Host '  [4] Загрузка репозитория (clone / ZIP / файл)'
         Write-Host '  [5] Диагностика доступа к GitHub'
+        Write-Host '  [6] Проверка целостности файлов (SHA-256 по манифесту релиза)'
         Write-Host ''
         Write-Host '  [0] Назад'
         $c = (Read-Host 'Выбор').Trim()
@@ -2722,6 +2985,9 @@ function Show-GithubMenu {
             '3' { Update-LDManagerSelf }
             '4' { Show-RepoMenu }
             '5' { Show-GithubDiagnostics }
+            '6' { # [void] обязателен: функция возвращает $true/$false, и без этого
+                 # значение выводилось бы в меню как лишняя строка "True".
+                 [void](Test-FileIntegrity -Manifest (Get-ReleaseChecksumManifest)) }
             '0' { return }
             'q' { return }
             default { Write-Fail 'Неизвестный пункт меню.'; Start-Sleep -Milliseconds 500 }
@@ -2767,12 +3033,11 @@ try {
 }
 
 
-
 # SIG # Begin signature block
-# MIIb5gYJKoZIhvcNAQcCoIIb1zCCG9MCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
+# MIIFggYJKoZIhvcNAQcCoIIFczCCBW8CAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUdKpH6uWH2RwRSzN8M1mw3toS
-# b9qgghZQMIIDEjCCAfqgAwIBAgIQHb8OO1X7MrdClKYHA5HxWzANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUlkxPG1rnzerpJkbmMmM1UFxY
+# FE6gggMWMIIDEjCCAfqgAwIBAgIQHb8OO1X7MrdClKYHA5HxWzANBgkqhkiG9w0B
 # AQsFADAhMR8wHQYDVQQDDBZMRE1hbmFnZXIgQ29kZSBTaWduaW5nMB4XDTI2MDkz
 # MDExNDMzNFoXDTI5MDkzMDExNTMzNFowITEfMB0GA1UEAwwWTERNYW5hZ2VyIENv
 # ZGUgU2lnbmluZzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKaLCNs9
@@ -2788,134 +3053,15 @@ try {
 # KzMfuSW2ONV6CsB60CR1/10GTYmRbKV4ZLOzO3ZliCHp4v0od+2qdVMRMcpa4FJJ
 # G9NgOA8qfBXrj4aajsGfpAa5xhi0JFy8ecBIekrNtmBq9Rzq6IAkUktHzxQd/eFw
 # WJjbiJbZdGEvLSSGSDtdgcXTfBehHscJrJdnYkhlOeOXnWHCUR6/2S4ML+S4j4dt
-# KJ+xHVxvXhS9sdT8YTqqElgrAiHk3ZbM65N8uDCCBY0wggR1oAMCAQICEA6bGI75
-# 0C3n79tQ4ghAGFowDQYJKoZIhvcNAQEMBQAwZTELMAkGA1UEBhMCVVMxFTATBgNV
-# BAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UECxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIG
-# A1UEAxMbRGlnaUNlcnQgQXNzdXJlZCBJRCBSb290IENBMB4XDTIyMDgwMTAwMDAw
-# MFoXDTMxMTEwOTIzNTk1OVowYjELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lD
-# ZXJ0IEluYzEZMBcGA1UECxMQd3d3LmRpZ2ljZXJ0LmNvbTEhMB8GA1UEAxMYRGln
-# aUNlcnQgVHJ1c3RlZCBSb290IEc0MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIIC
-# CgKCAgEAv+aQc2jeu+RdSjwwIjBpM+zCpyUuySE98orYWcLhKac9WKt2ms2uexuE
-# DcQwH/MbpDgW61bGl20dq7J58soR0uRf1gU8Ug9SH8aeFaV+vp+pVxZZVXKvaJNw
-# wrK6dZlqczKU0RBEEC7fgvMHhOZ0O21x4i0MG+4g1ckgHWMpLc7sXk7Ik/ghYZs0
-# 6wXGXuxbGrzryc/NrDRAX7F6Zu53yEioZldXn1RYjgwrt0+nMNlW7sp7XeOtyU9e
-# 5TXnMcvak17cjo+A2raRmECQecN4x7axxLVqGDgDEI3Y1DekLgV9iPWCPhCRcKtV
-# gkEy19sEcypukQF8IUzUvK4bA3VdeGbZOjFEmjNAvwjXWkmkwuapoGfdpCe8oU85
-# tRFYF/ckXEaPZPfBaYh2mHY9WV1CdoeJl2l6SPDgohIbZpp0yt5LHucOY67m1O+S
-# kjqePdwA5EUlibaaRBkrfsCUtNJhbesz2cXfSwQAzH0clcOP9yGyshG3u3/y1Yxw
-# LEFgqrFjGESVGnZifvaAsPvoZKYz0YkH4b235kOkGLimdwHhD5QMIR2yVCkliWzl
-# DlJRR3S+Jqy2QXXeeqxfjT/JvNNBERJb5RBQ6zHFynIWIgnffEx1P2PsIV/EIFFr
-# b7GrhotPwtZFX50g/KEexcCPorF+CiaZ9eRpL5gdLfXZqbId5RsCAwEAAaOCATow
-# ggE2MA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0OBBYEFOzX44LScV1kTN8uZz/nupiu
-# HA9PMB8GA1UdIwQYMBaAFEXroq/0ksuCMS1Ri6enIZ3zbcgPMA4GA1UdDwEB/wQE
-# AwIBhjB5BggrBgEFBQcBAQRtMGswJAYIKwYBBQUHMAGGGGh0dHA6Ly9vY3NwLmRp
-# Z2ljZXJ0LmNvbTBDBggrBgEFBQcwAoY3aHR0cDovL2NhY2VydHMuZGlnaWNlcnQu
-# Y29tL0RpZ2lDZXJ0QXNzdXJlZElEUm9vdENBLmNydDBFBgNVHR8EPjA8MDqgOKA2
-# hjRodHRwOi8vY3JsMy5kaWdpY2VydC5jb20vRGlnaUNlcnRBc3N1cmVkSURSb290
-# Q0EuY3JsMBEGA1UdIAQKMAgwBgYEVR0gADANBgkqhkiG9w0BAQwFAAOCAQEAcKC/
-# Q1xV5zhfoKN0Gz22Ftf3v1cHvZqsoYcs7IVeqRq7IviHGmlUIu2kiHdtvRoU9BNK
-# ei8ttzjv9P+Aufih9/Jy3iS8UgPITtAq3votVs/59PesMHqai7Je1M/RQ0SbQyHr
-# lnKhSLSZy51PpwYDE3cnRNTnf+hZqPC/Lwum6fI0POz3A8eHqNJMQBk1RmppVLC4
-# oVaO7KTVPeix3P0c2PR3WlxUjG/voVA9/HYJaISfb8rbII01YBwCA8sgsKxYoA5A
-# Y8WYIsGyWfVVa88nq2x2zm8jLfR+cWojayL/ErhULSd+2DrZ8LaHlv1b0VysGMNN
-# n3O3AamfV6peKOK5lDCCBrQwggScoAMCAQICEA3HrFcF/yGZLkBDIgw6SYYwDQYJ
-# KoZIhvcNAQELBQAwYjELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IElu
-# YzEZMBcGA1UECxMQd3d3LmRpZ2ljZXJ0LmNvbTEhMB8GA1UEAxMYRGlnaUNlcnQg
-# VHJ1c3RlZCBSb290IEc0MB4XDTI1MDUwNzAwMDAwMFoXDTM4MDExNDIzNTk1OVow
-# aTELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMUEwPwYDVQQD
-# EzhEaWdpQ2VydCBUcnVzdGVkIEc0IFRpbWVTdGFtcGluZyBSU0E0MDk2IFNIQTI1
-# NiAyMDI1IENBMTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBALR4MdMK
-# mEFyvjxGwBysddujRmh0tFEXnU2tjQ2UtZmWgyxU7UNqEY81FzJsQqr5G7A6c+Gh
-# /qm8Xi4aPCOo2N8S9SLrC6Kbltqn7SWCWgzbNfiR+2fkHUiljNOqnIVD/gG3SYDE
-# Ad4dg2dDGpeZGKe+42DFUF0mR/vtLa4+gKPsYfwEu7EEbkC9+0F2w4QJLVSTEG8y
-# AR2CQWIM1iI5PHg62IVwxKSpO0XaF9DPfNBKS7Zazch8NF5vp7eaZ2CVNxpqumzT
-# CNSOxm+SAWSuIr21Qomb+zzQWKhxKTVVgtmUPAW35xUUFREmDrMxSNlr/NsJyUXz
-# dtFUUt4aS4CEeIY8y9IaaGBpPNXKFifinT7zL2gdFpBP9qh8SdLnEut/GcalNeJQ
-# 55IuwnKCgs+nrpuQNfVmUB5KlCX3ZA4x5HHKS+rqBvKWxdCyQEEGcbLe1b8Aw4wJ
-# khU1JrPsFfxW1gaou30yZ46t4Y9F20HHfIY4/6vHespYMQmUiote8ladjS/nJ0+k
-# 6MvqzfpzPDOy5y6gqztiT96Fv/9bH7mQyogxG9QEPHrPV6/7umw052AkyiLA6tQb
-# Zl1KhBtTasySkuJDpsZGKdlsjg4u70EwgWbVRSX1Wd4+zoFpp4Ra+MlKM2baoD6x
-# 0VR4RjSpWM8o5a6D8bpfm4CLKczsG7ZrIGNTAgMBAAGjggFdMIIBWTASBgNVHRMB
-# Af8ECDAGAQH/AgEAMB0GA1UdDgQWBBTvb1NK6eQGfHrK4pBW9i/USezLTjAfBgNV
-# HSMEGDAWgBTs1+OC0nFdZEzfLmc/57qYrhwPTzAOBgNVHQ8BAf8EBAMCAYYwEwYD
-# VR0lBAwwCgYIKwYBBQUHAwgwdwYIKwYBBQUHAQEEazBpMCQGCCsGAQUFBzABhhho
-# dHRwOi8vb2NzcC5kaWdpY2VydC5jb20wQQYIKwYBBQUHMAKGNWh0dHA6Ly9jYWNl
-# cnRzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRSb290RzQuY3J0MEMGA1Ud
-# HwQ8MDowOKA2oDSGMmh0dHA6Ly9jcmwzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRy
-# dXN0ZWRSb290RzQuY3JsMCAGA1UdIAQZMBcwCAYGZ4EMAQQCMAsGCWCGSAGG/WwH
-# ATANBgkqhkiG9w0BAQsFAAOCAgEAF877FoAc/gc9EXZxML2+C8i1NKZ/zdCHxYga
-# MH9Pw5tcBnPw6O6FTGNpoV2V4wzSUGvI9NAzaoQk97frPBtIj+ZLzdp+yXdhOP4h
-# CFATuNT+ReOPK0mCefSG+tXqGpYZ3essBS3q8nL2UwM+NMvEuBd/2vmdYxDCvwzJ
-# v2sRUoKEfJ+nN57mQfQXwcAEGCvRR2qKtntujB71WPYAgwPyWLKu6RnaID/B0ba2
-# H3LUiwDRAXx1Neq9ydOal95CHfmTnM4I+ZI2rVQfjXQA1WSjjf4J2a7jLzWGNqNX
-# +DF0SQzHU0pTi4dBwp9nEC8EAqoxW6q17r0z0noDjs6+BFo+z7bKSBwZXTRNivYu
-# ve3L2oiKNqetRHdqfMTCW/NmKLJ9M+MtucVGyOxiDf06VXxyKkOirv6o02OoXN4b
-# FzK0vlNMsvhlqgF2puE6FndlENSmE+9JGYxOGLS/D284NHNboDGcmWXfwXRy4kbu
-# 4QFhOm0xJuF2EZAOk5eCkhSxZON3rGlHqhpB/8MluDezooIs8CVnrpHMiD2wL40m
-# m53+/j7tFaxYKIqL0Q4ssd8xHZnIn/7GELH3IdvG2XlM9q7WP/UwgOkw/HQtyRN6
-# 2JK4S1C8uw3PdBunvAZapsiI5YKdvlarEvf8EA+8hcpSM9LHJmyrxaFtoza2zNaQ
-# 9k+5t1wwggbtMIIE1aADAgECAhAIT9wzT35FTtvDD4/5khg1MA0GCSqGSIb3DQEB
-# CwUAMGkxCzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8G
-# A1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBHNCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBT
-# SEEyNTYgMjAyNSBDQTEwHhcNMjYwODA1MDAwMDAwWhcNMzcxMTA0MjM1OTU5WjBj
-# MQswCQYDVQQGEwJVUzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4xOzA5BgNVBAMT
-# MkRpZ2lDZXJ0IFNIQTI1NiBSU0E0MDk2IFRpbWVzdGFtcCBSZXNwb25kZXIgMjAy
-# NiAxMIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAtnum8sn+zUr41JtM
-# ZbP9OMYw+HwJDpG5xkIu/lqcfNYmMX81YmsUiHLbh9ykpeWBGKTLhYBrAN9Tdg/Q
-# EzG32XcObmgIblnr0CoQ3WSAeDZ6nH6X6VkFyYkJw3QBJREwvm4UhLzSxmwPA7cF
-# KRTEOMsmEEj6qJk/dqLEAL+oQYuOwE2UuiX1Vnul8YReIyWd4kgLn9gq6LNXM0Up
-# lkR6jL/QHxmb6fMoGBJYbnaUI7XD6cKDpekK2SVMld4iDbzeHDtOaaxldH5IxuNu
-# sQ69nd8/ZXEiB5Hbxj3RlK13cX1W4DlFXKdv/CEhM8Cj1vvlmvhNroyPdRGbbpBl
-# gyf8Wdu5N6ByhFwURn0U6ozlPoxN22v+fviUhP+6DR547OZnpBMWDfei1f5sVGwi
-# iW/KQTWOK97g+4RJpPzPNV4VYMAwO2jM2Aty2QYPVmOQTJm0msuXnJrSbl2gf9Jy
-# lpkJlWXqk1Q4LJsxz+TELoQCZIljbgvTJgoPU2R12ydv8i1UqL/adelA0y7U9Pmm
-# tbze9Xx3rtajC5SzQd1jgfwAwsa90v9YcSPdmeoyoBBA/27cCL237l5DTYYPDLQ4
-# ON3OLTGWnvRb6jDrf/T75gMRfUzSLCBQfBusm9+mSWRlC/Df6S/e9Q8i13CuhzOT
-# 2Jx+V/nlbXM4QoBwlUAhelwwJT0CAwEAAaOCAZUwggGRMAwGA1UdEwEB/wQCMAAw
-# HQYDVR0OBBYEFBTJY4owLtRK+26U8+bjQH717M3iMB8GA1UdIwQYMBaAFO9vU0rp
-# 5AZ8esrikFb2L9RJ7MtOMA4GA1UdDwEB/wQEAwIHgDAWBgNVHSUBAf8EDDAKBggr
-# BgEFBQcDCDCBlQYIKwYBBQUHAQEEgYgwgYUwJAYIKwYBBQUHMAGGGGh0dHA6Ly9v
-# Y3NwLmRpZ2ljZXJ0LmNvbTBdBggrBgEFBQcwAoZRaHR0cDovL2NhY2VydHMuZGln
-# aWNlcnQuY29tL0RpZ2lDZXJ0VHJ1c3RlZEc0VGltZVN0YW1waW5nUlNBNDA5NlNI
-# QTI1NjIwMjVDQTEuY3J0MF8GA1UdHwRYMFYwVKBSoFCGTmh0dHA6Ly9jcmwzLmRp
-# Z2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRHNFRpbWVTdGFtcGluZ1JTQTQwOTZT
-# SEEyNTYyMDI1Q0ExLmNybDAgBgNVHSAEGTAXMAgGBmeBDAEEAjALBglghkgBhv1s
-# BwEwDQYJKoZIhvcNAQELBQADggIBAI3FOmEenVIK35msCYB+fShAsWvSYvLBItoN
-# dAgQ2jIqrGsVsluXMJU/+mRebBc52s6lbKAvOVPXaizmKkMLLflEEKDZQx4CkS2t
-# 8aHPjkXha3hYZ010htFa3dhNgmalH5vuWvh3tTCf4frTS7gPtGc4Z/xaPhQ2AB1m
-# R8eEe/WbH0RWHvVIl6VwQ3+g5FKNfN2N/DWJkf13w2H+2GfqEfbd35Ww8CvoYBjL
-# NIDTadcPWdgsjsiOaK/7EsKJgLjUNIVgvcaFOLLQ/GlrA+0ZHJoFUbOr5SJN8zyk
-# PspXIXlpDJY/gqFUZRROeab9GVgmhbdOJcD/63RhxPahFUGbckRONqMe6DYAv6/m
-# OG0pWd3cPStsdcS7buj5DyniwRY8yooMH6ptx5vpP/pZzBPBeZD2U4IsthyxB5Ja
-# a8qrOkB5z160TXiM5ADMspZ0TfD9MJoq0tFpFPssKRFhWeEDYPvcUuN7U7lvcdHl
-# 4ezQ3NT/7Ffs1sR1yh/LRbdZ3B3Vc6q2WmD8mDC0p9kzl2o73iVtS946IkEj7FkR
-# sZGww1teYxERROC745xrtjvcw9ZyyUjHZWGRIpJeMNsPquCDf0fkyHtB+J4AiNZq
-# CQk23rxh+KbpyMTNVKItJ5l92Svl20U9NbqMBOVYl1h54NEYLJq1/xHWFKPNK903
-# zJZA9P2DMYIFADCCBPwCAQEwNTAhMR8wHQYDVQQDDBZMRE1hbmFnZXIgQ29kZSBT
-# aWduaW5nAhAdvw47Vfsyt0KUpgcDkfFbMAkGBSsOAwIaBQCgeDAYBgorBgEEAYI3
-# AgEMMQowCKACgAChAoAAMBkGCSqGSIb3DQEJAzEMBgorBgEEAYI3AgEEMBwGCisG
-# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMCMGCSqGSIb3DQEJBDEWBBSSrCwBHp3x
-# rU4vVfpMVEbWCJBEpTANBgkqhkiG9w0BAQEFAASCAQB+HlrNaCbZ535pydxDJf4z
-# jkRi2NetK3kgvCb0BRhfZaP8hSQvh2eiEfSt6TDgEI7pGzJ9PfQeoLkqhVosAChK
-# EcMRYg/geQMjCFBryapKpPw7fV4vDCbuab+VJTZf88HszTuwEj3s9JlATQ27i2W9
-# juXYzzh+bauxOK0Xgd7vIM9ewqJTXIc8IeJMzcnnf16BE7ZIiSALcmmz4tSByPau
-# CYx+rXrz1b86jAS6PQfHmOLziQXFN5im96Z+cM3D5GSkzYjXsRg07cSr5cO3y2Fc
-# 9Ss/GJBLvNE4Sp3wVFHD0A+hLw1+lWzO1lEGWzy0cQAukv1Dg6+8crXox3pFjS5G
-# oYIDJjCCAyIGCSqGSIb3DQEJBjGCAxMwggMPAgEBMH0waTELMAkGA1UEBhMCVVMx
-# FzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMUEwPwYDVQQDEzhEaWdpQ2VydCBUcnVz
-# dGVkIEc0IFRpbWVTdGFtcGluZyBSU0E0MDk2IFNIQTI1NiAyMDI1IENBMQIQCE/c
-# M09+RU7bww+P+ZIYNTANBglghkgBZQMEAgEFAKBpMBgGCSqGSIb3DQEJAzELBgkq
-# hkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8XDTI2MTAwMTA3MjI1M1owLwYJKoZIhvcN
-# AQkEMSIEIIe4Sk+1yzimXYkWaSwiD9Lx8V1Cex8xYzvDbyF2TFO4MA0GCSqGSIb3
-# DQEBAQUABIICAFipbrLFggXTDeQ9qm0m+UOjkidAlAdRFk3GJbEWcrSHJp8gzxSI
-# 29jyzg+7SZL46rc9+hnzQk/FRQMXp1EPM81zp5Yv2g8jfM21yFTNaiheERn3FSvb
-# RZuejE/2ffaGt/YaTCAWQxuahG3WHLpWBeRvRJ5tTJYA1SAddgE/bXzvVqux+xMX
-# DtJ7Z4PnNDHyhCntwogGc0McD/4RPMBaH8K2PfY2zeK8jgz2PVS2LNPYETfSUlEJ
-# wuU1M1vuwYdmCH+tTf6TUm2QhExt5p2PCO5QU/EFIZQO2zzfgzzBw8/oR7trcl2v
-# VKlxQXPZ+t34vVHOS8oRaZD7dJAgHDWUOPi9ErxWnOz19C9M0eutFjLgFggXBd6b
-# AEIvEa7rtARsNFIwqf1v9JtQ4H/IPmZlPh7GrEEcsvsSJB1rSuH2MWbsDZ2XqCax
-# itf/B/NNp+1SmChl0FfSuPzwbLICm/hm6ZRkTD5VpCSRfFkI4yhj4Q5DrNDz/uy/
-# E+GiDq8Y2zrUSXIF1zPuVyAi8bd0TQ04qR007inC+7SijXUeSZu3TqkbHRy5I8qc
-# pwl7SvKeCa3CSFy6xQP2v7wpSH+mIy2Ql4vGxGNbVTcGZZmskGqF1BGoCEYvt0LE
-# LMMQ80pdaGUAFtKvEXnVV1Fn8VXyHoUzi6rnIloynpv+431NUPy02IW3
+# KJ+xHVxvXhS9sdT8YTqqElgrAiHk3ZbM65N8uDGCAdYwggHSAgEBMDUwITEfMB0G
+# A1UEAwwWTERNYW5hZ2VyIENvZGUgU2lnbmluZwIQHb8OO1X7MrdClKYHA5HxWzAJ
+# BgUrDgMCGgUAoHgwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkqhkiG9w0B
+# CQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAj
+# BgkqhkiG9w0BCQQxFgQUX/cgYwnNbRGnkQEAwxTczRubCt0wDQYJKoZIhvcNAQEB
+# BQAEggEAYY4I1+l125V9Dmb/uEbqOYA1SSTafyGjiCfcWhzRQfzET11iHx8FvfdW
+# 1rmexqfzU2VjwsckA7V7D4lCpdt6ipqVZp035krtWy1j+As+X9yMqWoGz2emTnQL
+# XO7bDfPss6EOOY3Cdp8ZkBqNGe9AyMXJdPWiS+KQPV7/Smz3ETK1yeQI6XDdqlOT
+# aNyXHepcsyJw4Xdag+AHQMcr6zKXgneVWzJho/PMc3ZETCLpkRcV+q/PhC+0GfoS
+# kGGwM/b53cOHWA8yQmvywKcDnCKv2/0YENsuEy0uViDKUjJoHzaqYxXHWRXyLYUa
+# lpWuw65zZCH9P4vwpaunQiO5lVOSUw==
 # SIG # End signature block
