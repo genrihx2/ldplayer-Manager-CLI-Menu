@@ -282,7 +282,6 @@ Describe 'GitHub: диагностика Test-GithubEndpoint' {
     }
 
     It 'Get-HttpErrorStatusCode достаёт код из синтетического исключения' {
-        $err = [pscustomobject]@{ Exception = [pscustomobject]@{ Response = [pscustomobject]@{ StatusCode = [pscustomobject]@{ } } } }
         # StatusCode как enum-подобный объект: проверяем обычный путь через int
         $err2 = [pscustomobject]@{ Exception = [pscustomobject]@{ Response = [pscustomobject]@{ StatusCode = 404 } } }
         Get-HttpErrorStatusCode $err2 | Should -Be 404

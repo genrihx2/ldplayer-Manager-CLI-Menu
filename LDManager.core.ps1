@@ -48,7 +48,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 # Версия и репозиторий
 # ---------------------------------------------------------------------------
-$script:ScriptVersion = '2.0.8'
+$script:ScriptVersion = '2.0.9'
 $script:RepoOwner   = 'genrihx2'
 $script:RepoName    = 'ldplayer-Manager-CLI-Menu'
 $script:RepoBranch  = 'main'
@@ -719,7 +719,7 @@ function Resolve-AdbTarget {
     $candidates = New-Object System.Collections.Generic.List[int]
     $cfgPort = Get-AdbPortFromConfig -Index $Index
     if ($cfgPort) { $candidates.Add($cfgPort) }
-    $candidates.Add(5555 + (2 * $Index))   # формула 5555 + index*2
+    $candidates.Add((Get-AdbTargetPort -Index $Index))   # формула 5555 + index*2
     $candidates.Add(5554 + (2 * $Index))   # вариант 5554 + index*2
 
     # Если ADB-отладка выключена в конфиге инстанса - порты и не появятся:
@@ -2209,15 +2209,6 @@ function Get-LatestReleaseInfo {
     }
 }
 
-function Get-ReleaseTag {
-    #Тег последнего релиза (например v2.0.5). Обновление качает по этому
-    #тегу, чтобы сверка SHA-256 не давала ложных расхождений при том, что
-    #ветка main может опережать последний опубликованный релиз.
-    $release = Get-LatestReleaseInfo
-    if ($release) { return $release.Tag }
-    return $script:RepoBranch
-}
-
 function Get-UpdateDownloadRef {
     # Ref, с которого качаются файлы обновления. Обязан совпадать с релизом,
     # чей SHA256SUMS мы сверяем: иначе честные хеши не сойдутся и обновление
@@ -2477,7 +2468,7 @@ function Update-LDManagerSelf {
     Write-Host ("  Локальная копия  : " + (Get-ScriptFileStamp))
 
     $check = Test-UpdateAvailable
-    if ($check -eq $null) {
+    if ($null -eq $check) {
         Write-Fail 'Не удалось получить версию из GitHub.'
         if ($script:LastUpdateCheckError) { Write-Note ("Причина: " + $script:LastUpdateCheckError) }
         Write-Note 'Подробнее: [g] GitHub -> [5] Диагностика доступа к GitHub.'
@@ -2790,7 +2781,7 @@ function Show-VersionInfo {
     Write-Host ''
     Write-Host '  Проверка обновлений...'
     $upd = Test-UpdateAvailable
-    if ($upd -eq $null) {
+    if ($null -eq $upd) {
         Write-Note 'Не удалось проверить обновления.'
         if ($script:LastUpdateCheckError) { Write-Note ("  Причина: " + $script:LastUpdateCheckError) }
     }
@@ -2997,7 +2988,7 @@ function Show-GithubMenu {
             '1' { Show-GithubTokenMenu }
             '2' {
                 $upd = Test-UpdateAvailable
-                if ($upd -eq $null) {
+                if ($null -eq $upd) {
                     Write-Fail 'Не удалось проверить обновления.'
                     if ($script:LastUpdateCheckError) { Write-Note ("Причина: " + $script:LastUpdateCheckError) }
                     Write-Note 'Подробнее: [5] Диагностика доступа к GitHub.'
@@ -3043,17 +3034,22 @@ function Initialize-LDManager {
     [void](Get-AdbExePath)
 }
 
-try {
-    Initialize-LDManager
-    Show-MainMenu
-} catch {
-    Write-Host ''
-    Write-Fail ("Критическая ошибка [{0}]: {1}" -f $_.Exception.GetType().Name, $_.Exception.Message)
-    if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) {
-        Write-Host $_.InvocationInfo.PositionMessage -ForegroundColor DarkGray
+# Авто-запуск меню. -LoadOnly отключает его: иначе подключение ядра
+# ради своих функций (тесты, диагностика) открывало меню и висело
+# в ожидании ввода. LDManager.ps1 отрезает этот блок по строке-маркеру.
+if (-not $LoadOnly) {
+    try {
+        Initialize-LDManager
+        Show-MainMenu
+    } catch {
+        Write-Host ''
+        Write-Fail ("Критическая ошибка [{0}]: {1}" -f $_.Exception.GetType().Name, $_.Exception.Message)
+        if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) {
+            Write-Host $_.InvocationInfo.PositionMessage -ForegroundColor DarkGray
+        }
+        if ($_.ScriptStackTrace) { Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray }
+        Wait-Enter
     }
-    if ($_.ScriptStackTrace) { Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray }
-    Wait-Enter
 }
 
 

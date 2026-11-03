@@ -34,7 +34,7 @@ $coreSrc = Get-Content -LiteralPath $corePath -Raw -Encoding UTF8
 # Убираем возможный BOM в начале строки — он мешает [scriptblock]::Create.
 if ($coreSrc.Length -gt 0 -and [int]$coreSrc[0] -eq 0xFEFF) { $coreSrc = $coreSrc.Substring(1) }
 
-$cut = $coreSrc.LastIndexOf('try {')
+$cut = $coreSrc.LastIndexOf('if (-not $LoadOnly) {')
 if ($cut -gt 0) { $coreSrc = $coreSrc.Substring(0, $cut) }
 
 # Ядро вычисляет $scriptRoot от $PSScriptRoot, который внутри скриптблока пуст,
