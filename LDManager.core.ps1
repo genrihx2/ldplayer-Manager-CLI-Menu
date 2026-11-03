@@ -48,7 +48,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 # Версия и репозиторий
 # ---------------------------------------------------------------------------
-$script:ScriptVersion = '2.0.10'
+$script:ScriptVersion = '2.1.0'
 $script:RepoOwner   = 'genrihx2'
 $script:RepoName    = 'ldplayer-Manager-CLI-Menu'
 $script:RepoBranch  = 'main'
@@ -1174,6 +1174,168 @@ function Set-LDRoot {
     }
     Write-Note 'Переключатель в окне LDPlayer обновится после его закрытия/открытия; действует после запуска инстанса.'
     Offer-Restart -Instance $inst
+}
+
+# ===========================================================================
+# ОПТИМИЗАЦИЯ: пресеты CPU/RAM/разрешения одним действием
+# ===========================================================================
+function Get-HostCapacity {
+    # Ресурсы этого компьютера — чтобы не отдать инстансу больше, чем есть.
+    $cores = $null
+    $ramMb = $null
+    try {
+        $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+        if ($cs.NumberOfLogicalProcessors) { $cores = [int]$cs.NumberOfLogicalProcessors }
+        if ($cs.TotalPhysicalMemory) { $ramMb = [int]([math]::Round($cs.TotalPhysicalMemory / 1MB)) }
+    } catch { }
+    if (-not $cores -or $cores -le 0) { $cores = [Environment]::ProcessorCount }
+    if ($null -eq $ramMb -or $ramMb -le 0) { $ramMb = $null }
+    return [pscustomobject]@{ Cores = [int]$cores; RamMb = $ramMb }
+}
+
+function Get-LDPerformancePreset {
+    # Пресеты оптимизации. CPU и RAM подрезаются под реальное железо:
+    # больше ядер/памяти, чем есть в машине, даёт только тормоза.
+    # RAM ограничиваем половиной физической памяти и списком, который
+    # принимает ldconsole (256..8192), чтобы значение точно применилось.
+    param([int]$HostCores = 4, [int]$HostRamMb = 0)
+
+    $maxCpu = [math]::Max(1, [math]::Min(4, $HostCores))
+    $half = if ($HostRamMb -gt 0) { [int]($HostRamMb / 2) } else { 4096 }
+    $maxRam = 1024
+    foreach ($r in @(1024, 2048, 4096, 8192)) { if ($r -le $half) { $maxRam = $r } }
+
+    return @(
+        [pscustomobject]@{ Key = '1'; Name = 'Экономный';        Cpu = 1;                      RamMb = [math]::Min(1024, $maxRam); Resolution = '960,540,240';   Note = 'слабые машины и много инстансов' }
+        [pscustomobject]@{ Key = '2'; Name = 'Сбалансированный'; Cpu = [math]::Min(2, $maxCpu); RamMb = [math]::Min(2048, $maxRam); Resolution = '1280,720,240';  Note = 'повседневная работа' }
+        [pscustomobject]@{ Key = '3'; Name = 'Производительный'; Cpu = [math]::Min(3, $maxCpu); RamMb = [math]::Min(4096, $maxRam); Resolution = '1600,900,280';  Note = 'игры и тяжёлые приложения' }
+        [pscustomobject]@{ Key = '4'; Name = 'Максимальный';     Cpu = $maxCpu;                RamMb = $maxRam;                    Resolution = '1920,1080,480'; Note = 'один инстанс на всю машину' }
+    )
+}
+
+function Get-LDPerformanceState {
+    # Текущие CPU/RAM/разрешение из JSON-конфига инстанса. Поля $null —
+    # конфиг не найден или ключей в нём нет: значения не выдумываем.
+    param([int]$Index)
+    $state = [pscustomobject]@{ Cpu = $null; RamMb = $null; Resolution = $null }
+    if (-not $script:LdPath) { return $state }
+    $base = Split-Path $script:LdPath -Parent
+    $cfg = Join-Path $base "vms\config\leidian$Index.config"
+    if (-not (Test-Path $cfg)) { return $state }
+    try {
+        $j = Get-Content $cfg -Raw | ConvertFrom-Json
+        foreach ($pair in @(@('Cpu', 'basicSettings.cpuCount'), @('RamMb', 'basicSettings.memory'), @('Resolution', 'basicSettings.resolution'))) {
+            $prop = $j.PSObject.Properties[$pair[1]]
+            if ($prop -and $prop.Value) { $state.($pair[0]) = [string]$prop.Value }
+        }
+    } catch { }
+    return $state
+}
+
+function Backup-LDInstanceConfig {
+    # Резервная копия конфигов инстанса перед правкой. Складываем рядом со
+    # скриптом, а не в папку установки LDPlayer: туда может не быть прав.
+    param([int]$Index)
+    if (-not $script:LdPath) { return $null }
+    $base = Split-Path $script:LdPath -Parent
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $dir = Join-Path $scriptRoot ("LDManager.instance_backup_{0}\leidian{1}" -f $stamp, $Index)
+    $copied = 0
+    try {
+        foreach ($rel in @("vms\leidian$Index\config.ini", "vms\config\leidian$Index.config")) {
+            $src = Join-Path $base $rel
+            if (-not (Test-Path $src)) { continue }
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            Copy-Item $src (Join-Path $dir (Split-Path $rel -Leaf)) -Force
+            $copied++
+        }
+    } catch {
+        Write-Note ("Резервная копия конфигов не создана: " + $_.Exception.Message)
+        return $null
+    }
+    if ($copied -eq 0) { Write-Note 'Конфиги инстанса не найдены — резервная копия не создана.'; return $null }
+    return $dir
+}
+
+function Show-LDOptimizeState {
+    $inst = Select-LDInstance -Purpose 'оптимизация (просмотр)'
+    if (-not $inst) { return }
+    # Имя $machine, а не $host: $Host — read-only автоматическая
+    # переменная PowerShell, присваивание в неё падает при запуске.
+    $machine = Get-HostCapacity
+    $state = Get-LDPerformanceState -Index $inst.Index
+    $curCpu = if ($state.Cpu) { $state.Cpu } else { 'н/д' }
+    $curRam = if ($state.RamMb) { "$($state.RamMb) МБ" } else { 'н/д' }
+    $curRes = if ($state.Resolution) { $state.Resolution } else { 'н/д' }
+    Write-Host ''
+    Write-Host ("  Компьютер : ядер {0}, RAM {1}" -f $host.Cores, $(if ($machine.RamMb) { "$($machine.RamMb) МБ" } else { 'н/д' }))
+    Write-Host ("  Инстанс   : CPU {0}, RAM {1}, разрешение {2}" -f $curCpu, $curRam, $curRes)
+    Write-Host ''
+    foreach ($p in (Get-LDPerformancePreset -HostCores $machine.Cores -HostRamMb $machine.RamMb)) {
+        Write-Host ("  [{0}] {1,-18} CPU {2}, RAM {3} МБ, {4}  — {5}" -f $p.Key, $p.Name, $p.Cpu, $p.RamMb, $p.Resolution, $p.Note)
+    }
+    Write-Note 'Больше ядер и памяти, чем есть в машине, только замедляет запуск.'
+    Wait-Enter
+}
+
+function Invoke-LDOptimize {
+    $inst = Select-LDInstance -RequireStopped -Purpose 'оптимизация'
+    if (-not $inst) { return }
+    # Имя $machine, а не $host: $Host — read-only автоматическая
+    # переменная PowerShell, присваивание в неё падает при запуске.
+    $machine = Get-HostCapacity
+    $state = Get-LDPerformanceState -Index $inst.Index
+    $presets = Get-LDPerformancePreset -HostCores $machine.Cores -HostRamMb $machine.RamMb
+    $curCpu = if ($state.Cpu) { $state.Cpu } else { 'н/д' }
+    $curRam = if ($state.RamMb) { "$($state.RamMb) МБ" } else { 'н/д' }
+    $curRes = if ($state.Resolution) { $state.Resolution } else { 'н/д' }
+    Write-Host ''
+    Write-Host ("  Сейчас: CPU {0}, RAM {1}, разрешение {2}" -f $curCpu, $curRam, $curRes)
+    Write-Host ''
+    foreach ($p in $presets) {
+        Write-Host ("  [{0}] {1,-18} CPU {2}, RAM {3} МБ, {4}  — {5}" -f $p.Key, $p.Name, $p.Cpu, $p.RamMb, $p.Resolution, $p.Note)
+    }
+    $c = (Read-Host 'Пресет (1-4, Enter - отмена)').Trim()
+    $preset = $presets | Where-Object { $_.Key -eq $c } | Select-Object -First 1
+    if (-not $preset) { Write-Note 'Отменено.'; Wait-Enter; return }
+    if (-not (Confirm-Action ("Применить «{0}»: CPU {1}, RAM {2} МБ, разрешение {3}?" -f $preset.Name, $preset.Cpu, $preset.RamMb, $preset.Resolution))) {
+        Write-Note 'Отменено.'
+        Wait-Enter
+        return
+    }
+    $backup = Backup-LDInstanceConfig -Index $inst.Index
+    Invoke-LDModify -Index $inst.Index -Props @{ cpu = [string]$preset.Cpu; memory = [string]$preset.RamMb; resolution = $preset.Resolution }
+    $after = Get-LDPerformanceState -Index $inst.Index
+    if ($after.Cpu -or $after.RamMb) {
+        $newCpu = if ($after.Cpu) { $after.Cpu } else { 'н/д' }
+        $newRam = if ($after.RamMb) { "$($after.RamMb) МБ" } else { 'н/д' }
+        Write-Host ("  В конфиге теперь: CPU {0}, RAM {1}" -f $newCpu, $newRam)
+    } else {
+        Write-Note 'Значения в конфиге не прочитались — проверьте настройки в окне LDPlayer.'
+    }
+    if ($backup) { Write-Note ("Резервная копия конфигов: " + $backup) }
+    Offer-Restart -Instance $inst
+}
+
+function Show-OptimizeMenu {
+    while ($true) {
+        Show-Banner
+        Write-Title 'Оптимизация инстанса'
+        Write-Host '  Пресеты CPU/RAM/разрешения одним действием (ldconsole modify).' -ForegroundColor DarkGray
+        Write-Host ''
+        Write-Host '  [1] Показать текущие настройки и пресеты'
+        Write-Host '  [2] Применить пресет'
+        Write-Host ''
+        Write-Host '  [0] Назад'
+        $c = (Read-Host 'Выбор').Trim()
+        switch ($c) {
+            '1' { Show-LDOptimizeState }
+            '2' { Invoke-LDOptimize }
+            '0' { return }
+            'q' { return }
+            default { Write-Fail 'Неизвестный пункт меню.'; Start-Sleep -Milliseconds 500 }
+        }
+    }
 }
 
 # ===========================================================================
@@ -2915,6 +3077,7 @@ function Show-MainMenu {
         Write-Host '  [1] Инстансы - список, запуск, остановка, создание, клонирование, удаление'
         Write-Host '  [2] Приложения - APK, запуск/остановка/удаление, очистка данных'
         Write-Host '  [3] Конфигурация - CPU, RAM, разрешение, root'
+        Write-Host '  [o] Оптимизация - пресеты CPU, RAM и разрешения одним действием'
         Write-Host '  [4] Идентификация устройства - IMEI/AndroidID/MAC, модель, SIM-страна'
         Write-Host '  [5] ADB - shell, команды, APK, файлы, скриншот, запись экрана'
         Write-Host '  [6] Действия - GPS, клавиши, сеть'
@@ -2935,6 +3098,7 @@ function Show-MainMenu {
             '1' { Show-InstanceMenu }
             '2' { Show-AppMenu }
             '3' { Show-ConfigMenu }
+            'o' { Show-OptimizeMenu }
             '4' { Show-IdentityMenu }
             '5' { Show-AdbMenu }
             '6' { Show-ActionMenu }

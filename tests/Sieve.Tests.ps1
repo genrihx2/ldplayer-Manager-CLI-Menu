@@ -489,6 +489,39 @@ Describe 'Целостность: выбор ref для скачивания' {
     }
 }
 
+Describe 'Оптимизация: пресеты CPU/RAM/разрешения' {
+    It 'на слабой машине (2 ядра, 4 ГБ) пресеты не превышают железо' {
+        $p = @(Get-LDPerformancePreset -HostCores 2 -HostRamMb 4096)
+        $p.Count | Should -Be 4
+        ($p | Measure-Object -Property Cpu -Maximum).Maximum | Should -BeLessOrEqual 2
+        ($p | Measure-Object -Property RamMb -Maximum).Maximum | Should -BeLessOrEqual 2048
+    }
+
+    It 'на мощной машине максимум упирается в 4 ядра и половину RAM' {
+        $p = @(Get-LDPerformancePreset -HostCores 16 -HostRamMb 32768)
+        ($p | Where-Object Key -eq '4').Cpu | Should -Be 4
+        ($p | Where-Object Key -eq '4').RamMb | Should -Be 8192
+    }
+
+    It 'одноядерная машина получает минимум одно ядро' {
+        $p = @(Get-LDPerformancePreset -HostCores 1 -HostRamMb 2048)
+        ($p | Measure-Object -Property Cpu -Minimum).Minimum | Should -Be 1
+    }
+
+    It 'разрешение в формате w,h,dpi, RAM из допустимых ldconsole значений' {
+        $allowed = @(256, 512, 768, 1024, 1536, 2048, 4096, 8192)
+        foreach ($p in @(Get-LDPerformancePreset -HostCores 8 -HostRamMb 16384)) {
+            $p.Resolution | Should -Match '^\d{2,5},\d{2,5},\d{2,3}$'
+            ($allowed -contains $p.RamMb) | Should -BeTrue
+        }
+    }
+
+    It 'без данных о железе берётся безопасный профиль' {
+        $p = @(Get-LDPerformancePreset -HostCores 8 -HostRamMb 0)
+        ($p | Where-Object Key -eq '4').RamMb | Should -Be 4096
+    }
+}
+
 Describe 'Автообновление: запись файлов' {
     It 'содержимое с BOM записывается с ОДНИМ BOM' {
         # Реальный регресс: содержимое из сети начинается с U+FEFF, а
