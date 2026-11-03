@@ -357,6 +357,27 @@ Describe 'GitHub: причины ошибок проверки обновлен�
     }
 }
 
+Describe 'Релиз: Get-LatestReleaseInfo' {
+    It 'объект из Invoke-RestMethod получает Tag и TagName, assets сохраняются' {
+        # Реальный регресс: прямое присваивание $r.Tag = ... падало с «не
+        # удалось найти свойство Tag», функция возвращала $null, и манифест
+        # SHA256SUMS не загружался никогда.
+        Mock Invoke-RestMethod {
+            return [pscustomobject]@{ tag_name = 'v9.9.9'; assets = @([pscustomobject]@{ name = 'SHA256SUMS' }) }
+        }
+        $r = Get-LatestReleaseInfo
+        $r | Should -Not -BeNull
+        $r.Tag | Should -Be 'v9.9.9'
+        $r.TagName | Should -Be 'v9.9.9'
+        @($r.assets).Count | Should -Be 1
+    }
+
+    It 'ошибка запроса -> null, а не исключение' {
+        Mock Invoke-RestMethod { throw 'boom' }
+        Get-LatestReleaseInfo | Should -BeNull
+    }
+}
+
 Describe 'Целостность: разбор манифеста SHA256SUMS' {
     BeforeEach {
         $script:LastChecksumError = $null

@@ -48,7 +48,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 # Версия и репозиторий
 # ---------------------------------------------------------------------------
-$script:ScriptVersion = '2.0.7'
+$script:ScriptVersion = '2.0.8'
 $script:RepoOwner   = 'genrihx2'
 $script:RepoName    = 'ldplayer-Manager-CLI-Menu'
 $script:RepoBranch  = 'main'
@@ -2197,8 +2197,12 @@ function Show-GithubDiagnostics {
 function Get-LatestReleaseInfo {
     try {
         $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$script:RepoOwner/$script:RepoName/releases/latest" -Headers (Get-GithubHeaders) -TimeoutSec 20
-        $r.Tag = $r.tag_name
-        $r.TagName = $r.tag_name
+        # Свойства добавляем через Add-Member: прямое присваивание
+        # $r.Tag = ... на объекте из Invoke-RestMethod падает с «не удалось
+        # найти свойство Tag», из-за чего функция ВСЕГДА возвращала $null,
+        # а вместе с ней пропадал и манифест SHA256SUMS.
+        $r | Add-Member -Force -NotePropertyName 'Tag' -NotePropertyValue $r.tag_name
+        $r | Add-Member -Force -NotePropertyName 'TagName' -NotePropertyValue $r.tag_name
         return $r
     } catch {
         return $null
