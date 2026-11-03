@@ -48,7 +48,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 # Версия и репозиторий
 # ---------------------------------------------------------------------------
-$script:ScriptVersion = '2.0.9'
+$script:ScriptVersion = '2.0.10'
 $script:RepoOwner   = 'genrihx2'
 $script:RepoName    = 'ldplayer-Manager-CLI-Menu'
 $script:RepoBranch  = 'main'
@@ -2458,6 +2458,16 @@ function Test-FileIntegrity {
     return ($bad -eq 0)
 }
 
+function Write-ScriptFileContent {
+    # Запись файла скрипта: ровно ОДИН BOM, иначе файл не разбирается.
+    # UTF8Encoding($true) сам добавляет BOM, а содержимое из сети уже
+    # начинается с U+FEFF — два BOM подряд давали ошибку «Непредвиденный
+    # атрибут CmdletBinding» и скрипт больше не запускался.
+    param([string]$Path, [string]$Content)
+    if ($Content.Length -gt 0 -and $Content[0] -eq [char]0xFEFF) { $Content = $Content.Substring(1) }
+    [System.IO.File]::WriteAllText($Path, $Content, (New-Object System.Text.UTF8Encoding($true)))
+}
+
 function Update-LDManagerSelf {
     [CmdletBinding()]
     param([switch]$Force)
@@ -2554,11 +2564,13 @@ function Update-LDManagerSelf {
         foreach ($f in $files) {
             $target = Join-Path $scriptRoot $f
             $content = [System.Text.Encoding]::UTF8.GetString($staged[$f].Bytes)
-            if ((Test-Path $target) -and ([System.IO.File]::ReadAllText($target) -ceq $content)) {
+            # Сравниваем без BOM и без блока подписи: иначе одинаковый код
+            # считался бы разным и файл перезаписывался на каждом запуске.
+            if ((Test-Path $target) -and ((Get-PlainContent -Text ([System.IO.File]::ReadAllText($target))) -ceq (Get-PlainContent -Text $content))) {
                 Write-Host ("  {0,-20} без изменений" -f $f)
                 continue
             }
-            [System.IO.File]::WriteAllText($target, $content, (New-Object System.Text.UTF8Encoding($true)))
+            Write-ScriptFileContent -Path $target -Content $content
             Write-Host ("  {0,-20} обновлён" -f $f) -ForegroundColor Green
             $changed += $f
         }

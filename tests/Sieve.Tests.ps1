@@ -489,6 +489,31 @@ Describe 'Целостность: выбор ref для скачивания' {
     }
 }
 
+Describe 'Автообновление: запись файлов' {
+    It 'содержимое с BOM записывается с ОДНИМ BOM' {
+        # Реальный регресс: содержимое из сети начинается с U+FEFF, а
+        # UTF8Encoding($true) добавлял ещё один — на диске оказывался двойной
+        # BOM, и скрипт не запускался («Непредвиденный атрибут CmdletBinding»).
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("ldm_bom_" + [guid]::NewGuid().ToString('N') + '.ps1')
+        try {
+            Write-ScriptFileContent -Path $tmp -Content (([char]0xFEFF) + '# test')
+            $b = [System.IO.File]::ReadAllBytes($tmp)
+            ($b[0..2] -join ',') | Should -Be '239,187,191'
+            $b[3] | Should -Be ([byte][char]'#')
+        } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'содержимое без BOM тоже получает ровно один BOM' {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("ldm_bom_" + [guid]::NewGuid().ToString('N') + '.ps1')
+        try {
+            Write-ScriptFileContent -Path $tmp -Content '# plain'
+            $b = [System.IO.File]::ReadAllBytes($tmp)
+            ($b[0..2] -join ',') | Should -Be '239,187,191'
+            $b[3] | Should -Be ([byte][char]'#')
+        } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 Describe 'Целостность: хеши и нормализация содержимого' {
     It 'Get-BytesHash совпадает с Get-FileHash для тех же байтов' {
         $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("ldm_t_" + [guid]::NewGuid().ToString('N') + '.bin')
