@@ -48,7 +48,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 # Версия и репозиторий
 # ---------------------------------------------------------------------------
-$script:ScriptVersion = '2.1.0'
+$script:ScriptVersion = '2.1.1'
 $script:RepoOwner   = 'genrihx2'
 $script:RepoName    = 'ldplayer-Manager-CLI-Menu'
 $script:RepoBranch  = 'main'
@@ -1268,7 +1268,7 @@ function Show-LDOptimizeState {
     $curRam = if ($state.RamMb) { "$($state.RamMb) МБ" } else { 'н/д' }
     $curRes = if ($state.Resolution) { $state.Resolution } else { 'н/д' }
     Write-Host ''
-    Write-Host ("  Компьютер : ядер {0}, RAM {1}" -f $host.Cores, $(if ($machine.RamMb) { "$($machine.RamMb) МБ" } else { 'н/д' }))
+    Write-Host ("  Компьютер : ядер {0}, RAM {1}" -f $machine.Cores, $(if ($machine.RamMb) { "$($machine.RamMb) МБ" } else { 'н/д' }))
     Write-Host ("  Инстанс   : CPU {0}, RAM {1}, разрешение {2}" -f $curCpu, $curRam, $curRes)
     Write-Host ''
     foreach ($p in (Get-LDPerformancePreset -HostCores $machine.Cores -HostRamMb $machine.RamMb)) {
