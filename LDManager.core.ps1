@@ -1992,6 +1992,7 @@ function Show-ActionMenu {
         Write-Host '  [3] Ввести текст в активное поле'
         Write-Host '  [4] Сеть: включить / выключить'
         Write-Host '  [5] Встряхнуть устройство'
+        Write-Host '  [6] GPS Пресеты'
         Write-Host ''
         Write-Host '  [0] Назад'
         $c = (Read-Host 'Выбор').Trim()
