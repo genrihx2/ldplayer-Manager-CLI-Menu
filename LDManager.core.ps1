@@ -48,7 +48,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 # Версия и репозиторий
 # ---------------------------------------------------------------------------
-$script:ScriptVersion = '2.1.1'
+$script:ScriptVersion = '2.1.2'
 $script:RepoOwner   = 'genrihx2'
 $script:RepoName    = 'ldplayer-Manager-CLI-Menu'
 $script:RepoBranch  = 'main'
