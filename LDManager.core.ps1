@@ -48,7 +48,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 # Версия и репозиторий
 # ---------------------------------------------------------------------------
-$script:ScriptVersion = '2.1.2'
+$script:ScriptVersion = '2.1.3'
 $script:RepoOwner   = 'genrihx2'
 $script:RepoName    = 'ldplayer-Manager-CLI-Menu'
 $script:RepoBranch  = 'main'
@@ -1974,6 +1974,95 @@ function Show-LogcatMenu {
             'q' { return }
             default { Write-Fail 'Неизвестный пункт меню.'; Start-Sleep -Milliseconds 500 }
         }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# GPS-пресеты: сохранённые координаты рядом со скриптом
+# ---------------------------------------------------------------------------
+function Get-GPSPresetPath {
+    $dir = Split-Path -Parent $script:ConfigPath
+    return (Join-Path $dir 'LDManager.gps_presets.json')
+}
+
+function Read-GPSPresets {
+    $path = Get-GPSPresetPath
+    if (-not (Test-Path -LiteralPath $path)) { return @() }
+    try {
+        $raw = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -eq $raw) { return @() }
+        return @($raw)
+    } catch {
+        Write-Note "Не удалось прочитать пресеты: $($_.Exception.Message)"
+        return @()
+    }
+}
+
+function Save-GPSPresets {
+    param([object[]]$Presets)
+    $path = Get-GPSPresetPath
+    try {
+        @($Presets) | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $path -Encoding UTF8
+        return $true
+    } catch {
+        Write-Fail "Не удалось сохранить пресеты: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Show-GPSPresetsMenu {
+    $presets = @(Read-GPSPresets)
+
+    while ($true) {
+        Show-Banner
+        Write-Title 'GPS Пресеты'
+        if ($presets.Count -eq 0) {
+            Write-Note 'Сохранённых пресетов пока нет.'
+        } else {
+            for ($i = 0; $i -lt $presets.Count; $i++) {
+                Write-Host ("  [{0}] {1} — {2}" -f ($i + 1), $presets[$i].name, $presets[$i].coords)
+            }
+        }
+        Write-Host ''
+        Write-Host '  [a] Добавить пресет'
+        Write-Host '  [0] Назад'
+        $c = (Read-Host 'Выбор').Trim()
+
+        if ($c -eq '0' -or $c -eq 'q') { return }
+
+        if ($c -eq 'a') {
+            $name = (Read-Host 'Название пресета').Trim()
+            if (-not $name) { $name = 'Пресет ' + (Get-Date -Format 'yyyy-MM-dd HH:mm') }
+            $ll = (Read-Host 'Долгота,широта (пример: 37.617698,55.755864)').Trim()
+            if ($ll -notmatch '^-?\d+(\.\d+)?,-?\d+(\.\d+)?$') {
+                Write-Fail 'Неверный формат координат.'
+                Wait-Enter
+                continue
+            }
+            $presets += [pscustomobject]@{
+                name    = $name
+                coords  = $ll
+                created = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+            }
+            if (Save-GPSPresets -Presets $presets) { Write-Ok "Пресет '$name' сохранён." }
+            Wait-Enter
+            continue
+        }
+
+        $n = 0
+        if ([int]::TryParse($c, [ref]$n) -and $n -ge 1 -and $n -le $presets.Count) {
+            $preset = $presets[$n - 1]
+            $inst = Select-LDInstance -RequireRunning -Purpose 'GPS-пресет'
+            if (-not $inst) { continue }
+            $out = Invoke-LDConsole -Arguments @('locate','--index',[string]$inst.Index,'--LLI',[string]$preset.coords)
+            if ($out) { Write-Host $out }
+            Write-Ok "Пресет '$($preset.name)' применён к $($inst.Name)."
+            Wait-Enter
+            continue
+        }
+
+        Write-Fail 'Неизвестный пункт меню.'
+        Start-Sleep -Milliseconds 500
     }
 }
 
