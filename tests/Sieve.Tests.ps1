@@ -584,3 +584,83 @@ Describe 'Целостность: хеши и нормализация соде�
         Get-PlainContent -Text $copy | Should -BeExactly $orig
     }
 }
+
+Describe 'Инстансы: экспорт списка в CSV' {
+    BeforeAll {
+        function New-ExportFixture {
+            param([string]$FirstName = 'Test One')
+            return @(
+                [pscustomobject]@{ Index = 0; Name = $FirstName; Running = $true;  Pid = 1234; Resolution = '1920x1080@240' },
+                [pscustomobject]@{ Index = 1; Name = 'inst two';  Running = $false; Pid = 0;    Resolution = '-' }
+            )
+        }
+
+        function New-ExportTempPath {
+            param([string]$Extension = '.csv')
+            return Join-Path ([System.IO.Path]::GetTempPath()) ('ldm_export_' + [guid]::NewGuid().ToString('N') + $Extension)
+        }
+    }
+
+    It 'пишет шапку с нужными колонками и по строке на инстанс' {
+        $tmp = New-ExportTempPath
+        try {
+            Export-LDInstancesCsv -Instances (New-ExportFixture) -Path $tmp | Out-Null
+            $lines = @(Get-Content -Path $tmp -Encoding UTF8)
+            # Кавычки в шапке зависят от версии PowerShell, поэтому сверяем имена колонок.
+            ($lines[0].Trim([char]0xFEFF) -replace '"', '') | Should -BeExactly 'Index,Name,Status,Resolution,Pid'
+            $lines.Count | Should -Be 3
+
+            $rows = @(Import-Csv -Path $tmp -Encoding UTF8)
+            $rows.Count | Should -Be 2
+            $rows[0].Index | Should -Be '0'
+            $rows[0].Name | Should -BeExactly 'Test One'
+            $rows[0].Status | Should -BeExactly 'running'
+            $rows[0].Resolution | Should -BeExactly '1920x1080@240'
+            $rows[0].Pid | Should -Be '1234'
+            $rows[1].Name | Should -BeExactly 'inst two'
+            $rows[1].Status | Should -BeExactly 'stopped'
+            $rows[1].Resolution | Should -BeExactly '-'
+        } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'пишет UTF-8 с BOM (кириллица читается обратно)' {
+        $tmp = New-ExportTempPath
+        try {
+            Export-LDInstancesCsv -Instances (New-ExportFixture -FirstName 'Инстанс Один') -Path $tmp | Out-Null
+            $bytes = [System.IO.File]::ReadAllBytes($tmp)
+            ($bytes[0..2] -join ',') | Should -Be '239,187,191'
+            (@(Import-Csv -Path $tmp -Encoding UTF8))[0].Name | Should -BeExactly 'Инстанс Один'
+        } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'экранирует запятую в имени кавычками' {
+        $tmp = New-ExportTempPath
+        try {
+            Export-LDInstancesCsv -Instances (New-ExportFixture -FirstName 'farm,01') -Path $tmp | Out-Null
+            $raw = Get-Content -Path $tmp -Encoding UTF8 -Raw
+            $raw | Should -Match '"farm,01"'
+            (@(Import-Csv -Path $tmp -Encoding UTF8))[0].Name | Should -BeExactly 'farm,01'
+        } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'пустой список возвращает $null и не создаёт файл' {
+        $tmp = New-ExportTempPath
+        try {
+            $res = Export-LDInstancesCsv -Instances @() -Path $tmp
+            $res | Should -BeNullOrEmpty
+            (Test-Path $tmp) | Should -BeFalse
+        } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'дописывает расширение .csv, если его нет в пути' {
+        $noExt = New-ExportTempPath -Extension ''
+        try {
+            $res = Export-LDInstancesCsv -Instances (New-ExportFixture) -Path $noExt
+            $res | Should -BeExactly ($noExt + '.csv')
+            (Test-Path ($noExt + '.csv')) | Should -BeTrue
+        } finally {
+            Remove-Item $noExt -Force -ErrorAction SilentlyContinue
+            Remove-Item ($noExt + '.csv') -Force -ErrorAction SilentlyContinue
+        }
+    }
+}

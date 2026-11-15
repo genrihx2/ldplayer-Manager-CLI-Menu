@@ -386,6 +386,59 @@ function Get-LDInstances {
     return $result
 }
 
+function Export-LDInstancesCsv {
+    param(
+        [object[]]$Instances,
+        [string]$Path
+    )
+
+    if (-not $PSBoundParameters.ContainsKey('Instances')) {
+        $Instances = @(Get-LDInstances)
+    }
+    if (-not $Instances -or $Instances.Count -eq 0) {
+        Write-Note 'Инстансы не найдены — экспортировать нечего.'
+        return $null
+    }
+
+    if (-not $Path) {
+        $default = Join-Path ([Environment]::GetFolderPath('Desktop')) ("LDManager_instances_{0}.csv" -f (Get-Date -Format 'yyyyMMdd_HHmm'))
+        $Path = (Read-Host "Путь для CSV (Enter - $default)").Trim().Trim('"')
+        if (-not $Path) { $Path = $default }
+    }
+    if ($Path -notmatch '\.csv$') { $Path = $Path + '.csv' }
+
+    if (-not [System.IO.Path]::IsPathRooted($Path)) {
+        $Path = Join-Path $PWD.ProviderPath $Path
+    }
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+        Write-Fail "Папка не найдена: $dir"
+        return $null
+    }
+
+    $rows = @(foreach ($i in $Instances) {
+        [pscustomobject]@{
+            Index      = $i.Index
+            Name       = $i.Name
+            Status     = $(if ($i.Running) { 'running' } else { 'stopped' })
+            Resolution = $i.Resolution
+            Pid        = $i.Pid
+        }
+    })
+
+    try {
+        $csv = ($rows | ConvertTo-Csv -NoTypeInformation) -join "`r`n"
+        # UTF-8 с BOM: иначе Excel показывает кириллицу в именах как мусор.
+        [System.IO.File]::WriteAllText($Path, $csv + "`r`n", (New-Object System.Text.UTF8Encoding($true)))
+    } catch {
+        Write-Fail "Не удалось записать CSV: $($_.Exception.Message)"
+        return $null
+    }
+
+    Write-Ok "Экспортировано $($rows.Count) инстанс(ов): $Path"
+    return $Path
+}
+
 function Show-InstanceTable {
     param([object[]]$Instances)
 
@@ -3072,6 +3125,7 @@ function Show-InstanceMenu {
         Write-Host '  [7] Переименовать инстанс'
         Write-Host '  [8] УДАЛИТЬ инстанс (необратимо!)'
         Write-Host '  [9] Расставить окна (sortWnd)'
+        Write-Host '  [e] Экспорт списка в CSV'
         Write-Host '  [r] Обновить список'
         Write-Host ''
         Write-Host '  [0] Назад'
@@ -3086,6 +3140,7 @@ function Show-InstanceMenu {
             '7' { Rename-LDInstance }
             '8' { Remove-LDInstance }
             '9' { Sort-LDWindows }
+            'e' { [void](Export-LDInstancesCsv); Wait-Enter }
             'r' { }
             '0' { return }
             'q' { return }
