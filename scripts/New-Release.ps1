@@ -38,7 +38,7 @@ param(
     # Отпечаток сертификата подписи (CurrentUser\My).
     [string]$CertThumbprint = 'BBED9325933AF158EB8F9149D67C7C023A3E5A2E',
     # Куда копировать обновлённые файлы при -SyncTestCopy.
-    [string]$TestCopyDir = 'C:\test\ldplayer-Manager-CLI-Menu'
+    [string]$TestCopyDir = 'C:\test\LDManager'
 )
 
 $ErrorActionPreference = 'Stop'
