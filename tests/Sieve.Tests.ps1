@@ -752,3 +752,21 @@ Describe 'Установки LDPlayer: обход папок и выбор ак�
         (Get-Content -LiteralPath $script:TestConfig -Raw) | Should -Match 'keep'
     }
 }
+
+Describe 'Версия: ядро и README' {
+    It 'заголовок README совпадает с ScriptVersion в ядре' {
+        # Регресс v2.1.4-v2.1.6: версию в заголовке поднимали руками, и она
+        # несколько раз отставала от ядра. New-Release.ps1 теперь делает это сам,
+        # а тест не даёт заголовку снова разъехаться с кодом.
+        $repo = Split-Path -Parent $PSScriptRoot
+        $coreText   = Get-Content -LiteralPath (Join-Path $repo 'LDManager.core.ps1') -Raw
+        $readmeText = Get-Content -LiteralPath (Join-Path $repo 'README.md') -Raw
+
+        $coreVer   = [regex]::Match($coreText,   "ScriptVersion\s*=\s*'(\d+\.\d+\.\d+)'").Groups[1].Value
+        $readmeVer = [regex]::Match($readmeText, '(?m)^#\s+LDManager\s+v(\d+\.\d+\.\d+)').Groups[1].Value
+
+        $coreVer   | Should -Not -BeNullOrEmpty
+        $readmeVer | Should -Not -BeNullOrEmpty
+        $readmeVer | Should -BeExactly $coreVer
+    }
+}

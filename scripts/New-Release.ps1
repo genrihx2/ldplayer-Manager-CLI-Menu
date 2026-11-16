@@ -76,6 +76,12 @@ Write-Step 'Проверки перед релизом'
 
 $corePath = Join-Path $root 'LDManager.core.ps1'
 $core = [System.IO.File]::ReadAllText($corePath)
+$readmePath = Join-Path $root 'README.md'
+if (-not (Test-Path -LiteralPath $readmePath)) { throw "Не найден README.md: $readmePath" }
+$readme = [System.IO.File]::ReadAllText($readmePath)
+if ($readme -notmatch '(?m)^#\s+LDManager\s+v\d+\.\d+\.\d+') {
+    throw 'В README.md нет заголовка вида "# LDManager vX.Y.Z" — версия в заголовке не обновится'
+}
 if ($core -notmatch "\`$script:ScriptVersion\s*=\s*'(\d+\.\d+\.\d+)'") {
     throw 'Не найдена строка версии ($script:ScriptVersion) в LDManager.core.ps1'
 }
@@ -160,6 +166,9 @@ $pattern = "(\`$script:ScriptVersion\s*=\s*')(\d+\.\d+\.\d+)(')"
 $newCore = [regex]::Replace($core, $pattern, { param($m) $m.Groups[1].Value + $Version + $m.Groups[3].Value })
 if ($newCore -eq $core) { throw 'Замена версии в ядре не сработала — проверьте файл' }
 [System.IO.File]::WriteAllText($corePath, $newCore, $Utf8Bom)
+$newReadme = [regex]::Replace($readme, '(?m)^(#\s+LDManager\s+v)\d+\.\d+\.\d+', { param($m) $m.Groups[1].Value + $Version })
+if ($newReadme -eq $readme) { throw 'Замена версии в заголовке README не сработала' }
+[System.IO.File]::WriteAllText($readmePath, $newReadme, $Utf8NoBom)
 [System.IO.File]::WriteAllText($notesFile, $notes, $Utf8Bom)
 Write-Info ("Создан {0}" -f (Split-Path -Leaf $notesFile))
 
@@ -171,6 +180,7 @@ if ($DryRun) {
     Write-Host "Версия в ядре: $current -> $Version (файл будет восстановлен)"
     Write-Host "Дальше без -DryRun: git add + commit 'Bump to $Version' + tag $tag + push origin main + push origin $tag"
     [System.IO.File]::WriteAllText($corePath, $core, $Utf8Bom)
+    [System.IO.File]::WriteAllText($readmePath, $readme, $Utf8NoBom)
     Remove-Item -LiteralPath $notesFile -Force
     Write-Host "`nDRY RUN завершён, рабочая копия восстановлена." -ForegroundColor Green
     return
@@ -182,6 +192,7 @@ if (-not $Yes) {
     $answer = Read-Host 'Продолжить? (y/N)'
     if ($answer -notmatch '^[Yy]([Dd][Aa])?$') {
         [System.IO.File]::WriteAllText($corePath, $core, $Utf8Bom)
+        [System.IO.File]::WriteAllText($readmePath, $readme, $Utf8NoBom)
         Remove-Item -LiteralPath $notesFile -Force
         throw 'Отменено пользователем, правки откачены'
     }
@@ -200,7 +211,7 @@ try {
     $body = @($commits | ForEach-Object { ($_ -split "`t", 2)[0] }) -join "`n"
     $msgFile = Join-Path $env:TEMP ('release-msg-{0}.txt' -f [guid]::NewGuid().ToString('N'))
     [System.IO.File]::WriteAllText($msgFile, "Bump to $Version`n`n$body`n", $Utf8NoBom)
-    Invoke-Git @('add', 'LDManager.core.ps1', "RELEASE_NOTES_$tag.md") | Out-Null
+    Invoke-Git @('add', 'LDManager.core.ps1', 'README.md', "RELEASE_NOTES_$tag.md") | Out-Null
     Invoke-Git @('commit', '-F', $msgFile) | Out-Null
     $commitDone = $true
     Remove-Item -LiteralPath $msgFile -Force
@@ -213,8 +224,9 @@ try {
     # и восстановление файлов создало бы новые незакоммиченные правки.
     if (-not $commitDone) {
         [System.IO.File]::WriteAllText($corePath, $core, $Utf8Bom)
+        [System.IO.File]::WriteAllText($readmePath, $readme, $Utf8NoBom)
         if (Test-Path -LiteralPath $notesFile) { Remove-Item -LiteralPath $notesFile -Force }
-        Write-Warning ("Откат: версия {0} возвращена в ядро, {1} удалён." -f $current, (Split-Path -Leaf $notesFile))
+        Write-Warning ("Откат: версия {0} возвращена в ядро и заголовок README, {1} удалён." -f $current, (Split-Path -Leaf $notesFile))
     }
     if ($msgFile -and (Test-Path -LiteralPath $msgFile)) { Remove-Item -LiteralPath $msgFile -Force }
     throw

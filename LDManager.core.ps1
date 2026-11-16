@@ -1234,24 +1234,64 @@ function Set-LDResolution {
 function Set-LDCpuRam {
     $inst = Select-LDInstance -RequireStopped -Purpose 'CPU/RAM'
     if (-not $inst) { return }
-    $cpu = (Read-Host 'Ядер CPU (1-4, Enter - не менять)').Trim()
-    Write-Host '  Доступные объёмы RAM (MB): 256, 512, 768, 1024, 1536, 2048, 4096, 8192'
-    $ram = (Read-Host 'Объём RAM в MB (Enter - не менять)').Trim()
+
+    # Показываем текущие значения инстанса и ресурсы машины: без этого
+    # непонятно, что сейчас стоит и какой максимум вообще имеет смысл ставить.
+    $machine = Get-HostCapacity
+    $state   = Get-LDPerformanceState -Index $inst.Index
+    $maxCpu  = [math]::Max(1, [math]::Min(4, $machine.Cores))
+    $ramValues = @(256, 512, 768, 1024, 1536, 2048, 4096, 8192)
+    $curCpu = if ($state.Cpu) { [string]$state.Cpu } else { 'н/д' }
+    $curRam = if ($state.RamMb) { [string]$state.RamMb } else { 'н/д' }
+    $ramHint = ($ramValues -join ', ')
+
+    Write-Host ''
+    Write-Host ("  Компьютер : ядер {0}, RAM {1}" -f $machine.Cores, $(if ($machine.RamMb) { "$($machine.RamMb) МБ" } else { 'н/д' }))
+    Write-Host ("  Инстанс   : CPU {0}, RAM {1}" -f $curCpu, $(if ($state.RamMb) { "$curRam МБ" } else { $curRam }))
+    Write-Host ''
+
+    $cpu = (Read-Host ("  Ядер CPU (1-{0}, Enter - оставить {1})" -f $maxCpu, $curCpu)).Trim()
+    Write-Host ("  Допустимая RAM (МБ): {0}" -f $ramHint)
+    $ram = (Read-Host ("  RAM в МБ (Enter - оставить {0})" -f $curRam)).Trim()
+
     $props = @{}
     if ($cpu) {
-        if ($cpu -notmatch '^[1-4]$') { Write-Fail 'CPU: введите число 1-4.'; Wait-Enter; return }
-        $props['cpu'] = $cpu
-    }
-    if ($ram) {
-        if ($ram -notmatch '^(256|512|768|1024|1536|2048|4096|8192)$') {
-            Write-Fail 'RAM: допустимы только значения из списка.'
+        if ($cpu -notmatch '^\d+$') { Write-Fail 'CPU: введите число.'; Wait-Enter; return }
+        $n = [int]$cpu
+        if ($n -lt 1 -or $n -gt $maxCpu) {
+            Write-Fail ("CPU: допустимо 1-{0} (ядер в машине: {1})." -f $maxCpu, $machine.Cores)
             Wait-Enter
             return
         }
-        $props['memory'] = $ram
+        $props['cpu'] = [string]$n
+    }
+    if ($ram) {
+        if (($ram -notmatch '^\d+$') -or -not ($ramValues -contains [int]$ram)) {
+            Write-Fail ("RAM: допустимы только {0} МБ." -f $ramHint)
+            Wait-Enter
+            return
+        }
+        if ($machine.RamMb -and ([int]$ram -gt ($machine.RamMb / 2))) {
+            Write-Note ("RAM {0} МБ больше половины памяти машины ({1} МБ) — инстансу может не хватить ресурсов." -f $ram, $machine.RamMb)
+        }
+        $props['memory'] = [string][int]$ram
     }
     if ($props.Count -eq 0) { Write-Note 'Ничего не изменено.'; Wait-Enter; return }
+
+    # Копия конфигов до правки: откатить «было/стало» без неё нечем.
+    $backup = Backup-LDInstanceConfig -Index $inst.Index
     Invoke-LDModify -Index $inst.Index -Props $props
+
+    # Подтверждаем фактический результат из конфига, а не только «команда выполнена».
+    $after = Get-LDPerformanceState -Index $inst.Index
+    if ($after.Cpu -or $after.RamMb) {
+        $newCpu = if ($after.Cpu) { $after.Cpu } else { 'н/д' }
+        $newRam = if ($after.RamMb) { "$($after.RamMb) МБ" } else { 'н/д' }
+        Write-Host ("  В конфиге теперь: CPU {0}, RAM {1}" -f $newCpu, $newRam)
+    } else {
+        Write-Note 'Значения в конфиге не прочитались — проверьте настройки в окне LDPlayer.'
+    }
+    if ($backup) { Write-Note ("Резервная копия конфигов: " + $backup) }
     Offer-Restart -Instance $inst
 }
 
