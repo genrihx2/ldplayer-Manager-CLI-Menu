@@ -212,12 +212,42 @@ function Save-ManagerConfig {
 # ---------------------------------------------------------------------------
 # Поиск ldconsole.exe / adb.exe
 # ---------------------------------------------------------------------------
+function Get-LDDirsUnderRoot {
+    param([string]$Root)
+
+    # Папки под одним корнем, где реально лежит ldconsole.exe: сам корень и
+    # подпапки до двух уровней — версия может быть вложенной (Vendor\Build9).
+    $found = New-Object System.Collections.Generic.List[string]
+    if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return $found }
+    if (Test-Path -LiteralPath (Join-Path $Root 'ldconsole.exe')) { $found.Add($Root) }
+    foreach ($d in @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue)) {
+        if (Test-Path -LiteralPath (Join-Path $d.FullName 'ldconsole.exe')) { $found.Add($d.FullName) }
+        foreach ($dd in @(Get-ChildItem -LiteralPath $d.FullName -Directory -ErrorAction SilentlyContinue)) {
+            if (Test-Path -LiteralPath (Join-Path $dd.FullName 'ldconsole.exe')) { $found.Add($dd.FullName) }
+        }
+    }
+    return $found
+}
+
 function Get-LDEmulatorDirs {
+    param(
+        # Явные корни поиска (используется тестами): при передаче реальные диски
+        # не опрашиваются, файловая система читается только внутри этих папок.
+        [string[]]$Roots
+    )
+
+    $dirs = New-Object System.Collections.Generic.List[string]
+    if ($Roots) {
+        foreach ($r in $Roots) {
+            foreach ($d in (Get-LDDirsUnderRoot -Root $r)) { $dirs.Add($d) }
+        }
+        return $dirs
+    }
+
     # Папки возможной установки LDPlayer ищутся обходом каталогов, а не сверкой
     # с фиксированным списком имён версий: сборки раскладывают файлы по-разному
     # (LDPlayer14, LDPlayer9, просто LDPlayer, вложенная папка версии внутри),
     # поэтому проверяем любые подпапки типовых корней — есть ли в них ldconsole.exe.
-    $dirs = New-Object System.Collections.Generic.List[string]
     foreach ($drive in @('C','D','E','F','G')) {
         if (-not (Test-Path -LiteralPath "${drive}:\")) { continue }
 
@@ -231,14 +261,7 @@ function Get-LDEmulatorDirs {
         }
 
         foreach ($root in $roots) {
-            if (-not (Test-Path -LiteralPath $root)) { continue }
-            if (Test-Path -LiteralPath (Join-Path $root 'ldconsole.exe')) { $dirs.Add($root) }
-            foreach ($d in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
-                if (Test-Path -LiteralPath (Join-Path $d.FullName 'ldconsole.exe')) { $dirs.Add($d.FullName) }
-                foreach ($dd in @(Get-ChildItem -LiteralPath $d.FullName -Directory -ErrorAction SilentlyContinue)) {
-                    if (Test-Path -LiteralPath (Join-Path $dd.FullName 'ldconsole.exe')) { $dirs.Add($dd.FullName) }
-                }
-            }
+            foreach ($d in (Get-LDDirsUnderRoot -Root $root)) { $dirs.Add($d) }
         }
     }
     return $dirs

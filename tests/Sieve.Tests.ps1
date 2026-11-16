@@ -664,3 +664,91 @@ Describe 'Инстансы: экспорт списка в CSV' {
         }
     }
 }
+
+Describe 'Установки LDPlayer: обход папок и выбор активной' {
+    BeforeAll {
+        # Всё строится в уникальной временной папке: реальные C:\LDPlayer и
+        # Program Files не читаются, тесты не зависят от машины.
+        $script:InstRoot   = Join-Path ([System.IO.Path]::GetTempPath()) ('ldm_inst_' + [guid]::NewGuid().ToString('N'))
+        $script:InstA      = Join-Path $script:InstRoot 'BuildA'
+        $script:InstB      = Join-Path $script:InstRoot 'BuildB'
+        $script:InstVendor = Join-Path $script:InstRoot 'Vendor'
+        $script:InstNested = Join-Path $script:InstVendor 'BuildC'
+        $script:InstEmpty  = Join-Path $script:InstRoot 'NotAnInstall'
+        foreach ($d in @($script:InstA, $script:InstB, $script:InstNested, $script:InstEmpty)) {
+            New-Item -ItemType Directory -Path $d -Force | Out-Null
+        }
+        Set-Content -Path (Join-Path $script:InstA 'ldconsole.exe') -Value 'stub'
+        Set-Content -Path (Join-Path $script:InstB 'ldconsole.exe') -Value 'stub'
+        Set-Content -Path (Join-Path $script:InstB 'adb.exe')       -Value 'stub'
+        Set-Content -Path (Join-Path $script:InstNested 'ldconsole.exe') -Value 'stub'
+        Set-Content -Path (Join-Path $script:InstEmpty 'readme.txt') -Value 'stub'
+
+        $script:OrigLdPath     = $script:LdPath
+        $script:OrigAdbPath    = $script:AdbPath
+        $script:OrigConfigPath = $script:ConfigPath
+        $script:TestConfig     = Join-Path $script:InstRoot 'LDManager.config.json'
+    }
+
+    AfterAll {
+        $script:LdPath     = $script:OrigLdPath
+        $script:AdbPath    = $script:OrigAdbPath
+        $script:ConfigPath = $script:OrigConfigPath
+        Remove-Item -LiteralPath $script:InstRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'находит установку с ldconsole.exe в подпапке и пропускает папку без него' {
+        $dirs = @(Get-LDEmulatorDirs -Roots $script:InstRoot)
+
+        $dirs.Count | Should -Be 3
+        $dirs | Should -Contain $script:InstA
+        $dirs | Should -Contain $script:InstB
+        # двухуровневая вложенность Vendor\BuildC
+        $dirs | Should -Contain $script:InstNested
+        $dirs | Should -Not -Contain $script:InstEmpty
+        $dirs | Where-Object { $_ -like '*NotAnInstall*' } | Should -BeNullOrEmpty
+    }
+
+    It 'выбор установки сохраняет ldconsolePath и adbPath в конфиг' {
+        $script:ConfigPath = $script:TestConfig
+        Remove-Item -LiteralPath $script:TestConfig -Force -ErrorAction SilentlyContinue
+        $script:LdPath  = $null
+        $script:AdbPath = $null
+        Mock Get-LDEmulatorDirs { @($script:InstA, $script:InstB) }
+        Mock Read-Host { '2' }
+
+        Select-LDInstallation
+
+        $expected = Join-Path $script:InstB 'ldconsole.exe'
+        $script:LdPath | Should -BeExactly $expected
+        $cfg = Get-Content -LiteralPath $script:TestConfig -Raw | ConvertFrom-Json
+        $cfg.ldconsolePath | Should -BeExactly $expected
+        $cfg.adbPath | Should -BeExactly (Join-Path $script:InstB 'adb.exe')
+    }
+
+    It 'неверный номер ничего не меняет' {
+        $script:ConfigPath = $script:TestConfig
+        $script:LdPath = Join-Path $script:InstA 'ldconsole.exe'
+        Set-Content -LiteralPath $script:TestConfig -Value '{"ldconsolePath":"keep"}'
+        Mock Get-LDEmulatorDirs { @($script:InstA, $script:InstB) }
+        Mock Read-Host { '9' }
+
+        Select-LDInstallation
+
+        $script:LdPath | Should -BeExactly (Join-Path $script:InstA 'ldconsole.exe')
+        (Get-Content -LiteralPath $script:TestConfig -Raw) | Should -Match 'keep'
+    }
+
+    It 'отмена по Enter ничего не меняет' {
+        $script:ConfigPath = $script:TestConfig
+        $script:LdPath = Join-Path $script:InstA 'ldconsole.exe'
+        Set-Content -LiteralPath $script:TestConfig -Value '{"ldconsolePath":"keep"}'
+        Mock Get-LDEmulatorDirs { @($script:InstA, $script:InstB) }
+        Mock Read-Host { '' }
+
+        Select-LDInstallation
+
+        $script:LdPath | Should -BeExactly (Join-Path $script:InstA 'ldconsole.exe')
+        (Get-Content -LiteralPath $script:TestConfig -Raw) | Should -Match 'keep'
+    }
+}
