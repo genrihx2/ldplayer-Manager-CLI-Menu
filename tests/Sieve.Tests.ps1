@@ -497,9 +497,10 @@ Describe 'Оптимизация: пресеты CPU/RAM/разрешения' {
         ($p | Measure-Object -Property RamMb -Maximum).Maximum | Should -BeLessOrEqual 2048
     }
 
-    It 'на мощной машине максимум упирается в 4 ядра и половину RAM' {
+    It 'на мощной машине максимум упирается в 6 ядер и половину RAM' {
+        # 6 — потолок, который предлагает само окно LDPlayer.
         $p = @(Get-LDPerformancePreset -HostCores 16 -HostRamMb 32768)
-        ($p | Where-Object Key -eq '4').Cpu | Should -Be 4
+        ($p | Where-Object Key -eq '4').Cpu | Should -Be 6
         ($p | Where-Object Key -eq '4').RamMb | Should -Be 8192
     }
 
@@ -768,5 +769,76 @@ Describe 'Версия: ядро и README' {
         $coreVer   | Should -Not -BeNullOrEmpty
         $readmeVer | Should -Not -BeNullOrEmpty
         $readmeVer | Should -BeExactly $coreVer
+    }
+}
+
+Describe 'Состояние производительности: чтение конфигов LDPlayer' {
+    BeforeAll {
+        # Установка LDPlayer имитируется во временной папке: реальный
+        # C:\LDPlayer и его конфиги не читаются.
+        $script:PerfRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('ldm_perf_' + [guid]::NewGuid().ToString('N'))
+        $script:PerfLd   = Join-Path $script:PerfRoot 'LDPlayer'
+        New-Item -ItemType Directory -Path (Join-Path $script:PerfLd 'vms\config')   -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $script:PerfLd 'vms\leidian1') -Force | Out-Null
+        Set-Content -Path (Join-Path $script:PerfLd 'ldconsole.exe') -Value 'stub'
+
+        $script:OrigLdPath = $script:LdPath
+        $script:LdPath = Join-Path $script:PerfLd 'ldconsole.exe'
+    }
+
+    AfterAll {
+        $script:LdPath = $script:OrigLdPath
+        Remove-Item -LiteralPath $script:PerfRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'читает CPU, RAM и разрешение из advancedSettings' {
+        $cfg = Join-Path $script:PerfLd 'vms\config\leidian0.config'
+        @{
+            'advancedSettings.cpuCount'      = 4
+            'advancedSettings.memorySize'    = 4096
+            'advancedSettings.resolutionDpi' = 240
+            'advancedSettings.resolution'    = @{ width = 1280; height = 720 }
+        } | ConvertTo-Json -Depth 5 | Set-Content -Path $cfg -Encoding UTF8
+
+        $s = Get-LDPerformanceState -Index 0
+
+        $s.Cpu        | Should -Be '4'
+        $s.RamMb      | Should -Be '4096'
+        $s.Resolution | Should -BeExactly '1280,720,240'
+    }
+
+    It 'берёт CPU и RAM из leidian.vbox, если в конфиге их нет' {
+        $cfg = Join-Path $script:PerfLd 'vms\config\leidian1.config'
+        @{
+            'advancedSettings.resolutionDpi' = 480
+            'advancedSettings.resolution'    = @{ width = 1920; height = 1080 }
+        } | ConvertTo-Json -Depth 5 | Set-Content -Path $cfg -Encoding UTF8
+
+        $vbox = @'
+<?xml version="1.0"?>
+<VirtualBox>
+  <Machine>
+    <Hardware>
+      <CPU count="6" hotplug="false"/>
+      <Memory RAMSize="6144"/>
+    </Hardware>
+  </Machine>
+</VirtualBox>
+'@
+        Set-Content -Path (Join-Path $script:PerfLd 'vms\leidian1\leidian.vbox') -Value $vbox -Encoding UTF8
+
+        $s = Get-LDPerformanceState -Index 1
+
+        $s.Cpu        | Should -Be '6'
+        $s.RamMb      | Should -Be '6144'
+        $s.Resolution | Should -BeExactly '1920,1080,480'
+    }
+
+    It 'без конфига и vbox возвращает null, а не выдуманные значения' {
+        $s = Get-LDPerformanceState -Index 7
+
+        $s.Cpu        | Should -BeNullOrEmpty
+        $s.RamMb      | Should -BeNullOrEmpty
+        $s.Resolution | Should -BeNullOrEmpty
     }
 }

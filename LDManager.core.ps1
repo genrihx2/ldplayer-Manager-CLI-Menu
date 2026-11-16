@@ -1239,8 +1239,10 @@ function Set-LDCpuRam {
     # непонятно, что сейчас стоит и какой максимум вообще имеет смысл ставить.
     $machine = Get-HostCapacity
     $state   = Get-LDPerformanceState -Index $inst.Index
-    $maxCpu  = [math]::Max(1, [math]::Min(4, $machine.Cores))
-    $ramValues = @(256, 512, 768, 1024, 1536, 2048, 4096, 8192)
+    # LDPlayer сам предлагает до 6 ядер и объёмы RAM с шагом 3072/6144 МБ —
+    # меню не должно резать список уже, чем окно эмулятора.
+    $maxCpu  = [math]::Max(1, [math]::Min(6, $machine.Cores))
+    $ramValues = @(256, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192)
     $curCpu = if ($state.Cpu) { [string]$state.Cpu } else { 'н/д' }
     $curRam = if ($state.RamMb) { [string]$state.RamMb } else { 'н/д' }
     $ramHint = ($ramValues -join ', ')
@@ -1250,6 +1252,12 @@ function Set-LDCpuRam {
     Write-Host ("  Инстанс   : CPU {0}, RAM {1}" -f $curCpu, $(if ($state.RamMb) { "$curRam МБ" } else { $curRam }))
     Write-Host ''
 
+    # Подсказка «как в окне LDPlayer»: там отмечено рекомендуемое значение.
+    $halfRam = if ($machine.RamMb) { [int]($machine.RamMb / 2) } else { 4096 }
+    $recRam = 1024
+    foreach ($r in $ramValues) { if ($r -le $halfRam) { $recRam = $r } }
+    Write-Host ("  Ориентир: ядер {0}, RAM {1} МБ (не больше половины памяти машины)" -f $maxCpu, $recRam) -ForegroundColor DarkGray
+    Write-Host ''
     $cpu = (Read-Host ("  Ядер CPU (1-{0}, Enter - оставить {1})" -f $maxCpu, $curCpu)).Trim()
     Write-Host ("  Допустимая RAM (МБ): {0}" -f $ramHint)
     $ram = (Read-Host ("  RAM в МБ (Enter - оставить {0})" -f $curRam)).Trim()
@@ -1353,10 +1361,10 @@ function Get-LDPerformancePreset {
     # принимает ldconsole (256..8192), чтобы значение точно применилось.
     param([int]$HostCores = 4, [int]$HostRamMb = 0)
 
-    $maxCpu = [math]::Max(1, [math]::Min(4, $HostCores))
+    $maxCpu = [math]::Max(1, [math]::Min(6, $HostCores))
     $half = if ($HostRamMb -gt 0) { [int]($HostRamMb / 2) } else { 4096 }
     $maxRam = 1024
-    foreach ($r in @(1024, 2048, 4096, 8192)) { if ($r -le $half) { $maxRam = $r } }
+    foreach ($r in @(1024, 2048, 3072, 4096, 6144, 8192)) { if ($r -le $half) { $maxRam = $r } }
 
     return @(
         [pscustomobject]@{ Key = '1'; Name = 'Экономный';        Cpu = 1;                      RamMb = [math]::Min(1024, $maxRam); Resolution = '960,540,240';   Note = 'слабые машины и много инстансов' }
@@ -1367,21 +1375,66 @@ function Get-LDPerformancePreset {
 }
 
 function Get-LDPerformanceState {
-    # Текущие CPU/RAM/разрешение из JSON-конфига инстанса. Поля $null —
-    # конфиг не найден или ключей в нём нет: значения не выдумываем.
+    # Текущие CPU/RAM/разрешение инстанса. Раскладка отличается по версиям:
+    #   LDPlayer 14 — advancedSettings.cpuCount / memorySize в vms\config\leidianN.config;
+    #   LDPlayer 9  — этих ключей в конфиге нет, CPU и RAM только в
+    #                 vms\leidianN\leidian.vbox (<CPU count>, <Memory RAMSize>).
+    # Раньше читались basicSettings-ключи, которых не существует ни в одной
+    # версии, поэтому меню всегда показывало «н/д».
     param([int]$Index)
     $state = [pscustomobject]@{ Cpu = $null; RamMb = $null; Resolution = $null }
     if (-not $script:LdPath) { return $state }
     $base = Split-Path $script:LdPath -Parent
+
     $cfg = Join-Path $base "vms\config\leidian$Index.config"
-    if (-not (Test-Path $cfg)) { return $state }
-    try {
-        $j = Get-Content $cfg -Raw | ConvertFrom-Json
-        foreach ($pair in @(@('Cpu', 'basicSettings.cpuCount'), @('RamMb', 'basicSettings.memory'), @('Resolution', 'basicSettings.resolution'))) {
-            $prop = $j.PSObject.Properties[$pair[1]]
-            if ($prop -and $prop.Value) { $state.($pair[0]) = [string]$prop.Value }
+    if (Test-Path $cfg) {
+        try {
+            $j = Get-Content $cfg -Raw | ConvertFrom-Json
+
+            foreach ($n in @('advancedSettings.cpuCount', 'basicSettings.cpuCount')) {
+                $p = $j.PSObject.Properties[$n]
+                if ($p -and $p.Value) { $state.Cpu = [string]$p.Value; break }
+            }
+            foreach ($n in @('advancedSettings.memorySize', 'basicSettings.memory')) {
+                $p = $j.PSObject.Properties[$n]
+                if ($p -and $p.Value) { $state.RamMb = [string]$p.Value; break }
+            }
+
+            $res = $null
+            foreach ($n in @('advancedSettings.resolution', 'basicSettings.resolution')) {
+                $p = $j.PSObject.Properties[$n]
+                if ($p -and $p.Value) { $res = $p.Value; break }
+            }
+            if ($res) {
+                if ($res -is [string]) {
+                    $state.Resolution = [string]$res
+                } elseif ($res.width -and $res.height) {
+                    $dpiProp = $j.PSObject.Properties['advancedSettings.resolutionDpi']
+                    $dpi = if ($dpiProp -and $dpiProp.Value) { [string]$dpiProp.Value } else { '240' }
+                    $state.Resolution = ('{0},{1},{2}' -f $res.width, $res.height, $dpi)
+                }
+            }
+        } catch { }
+    }
+
+    # Резервный источник для версий без ключей в JSON (LDPlayer 9).
+    if ((-not $state.Cpu) -or (-not $state.RamMb)) {
+        $vbox = Join-Path $base "vms\leidian$Index\leidian.vbox"
+        if (Test-Path $vbox) {
+            try {
+                $xml = Get-Content $vbox -Raw
+                if (-not $state.Cpu) {
+                    $m = [regex]::Match($xml, '<CPU\s+count="(\d+)"')
+                    if ($m.Success) { $state.Cpu = $m.Groups[1].Value }
+                }
+                if (-not $state.RamMb) {
+                    $m = [regex]::Match($xml, '<Memory\s+RAMSize="(\d+)"')
+                    if ($m.Success) { $state.RamMb = $m.Groups[1].Value }
+                }
+            } catch { }
         }
-    } catch { }
+    }
+
     return $state
 }
 
