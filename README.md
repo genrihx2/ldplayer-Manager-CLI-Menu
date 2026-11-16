@@ -1,4 +1,4 @@
-# LDManager v2.1.6 — CLI-меню для LDPlayer Emulator
+# LDManager v2.1.7 — CLI-меню для LDPlayer Emulator
 
 Интерактивное PowerShell-меню для управления **локальными инстансами эмулятора LDPlayer** на вашем компьютере через официальный консольный интерфейс `ldconsole.exe` и `adb.exe`.
 
