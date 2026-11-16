@@ -36,7 +36,7 @@ param(
     # После релиза переподписать ядро и обновить тестовую копию.
     [switch]$SyncTestCopy,
     # Отпечаток сертификата подписи (CurrentUser\My).
-    [string]$CertThumbprint = '19C75C73A53D410489F8D23D0DA35427C44F9458',
+    [string]$CertThumbprint = 'BBED9325933AF158EB8F9149D67C7C023A3E5A2E',
     # Куда копировать обновлённые файлы при -SyncTestCopy.
     [string]$TestCopyDir = 'C:\test\ldplayer-Manager-CLI-Menu'
 )
@@ -187,24 +187,38 @@ if (-not $Yes) {
     }
 }
 
-Write-Step 'Переподписываю ядро с новой версией'
-$cert = Get-ChildItem "Cert:\CurrentUser\My\$CertThumbprint" -ErrorAction SilentlyContinue
-if (-not $cert) { throw "Сертификат $CertThumbprint не найден в Cert:\CurrentUser\My" }
-$sig = Set-AuthenticodeSignature -FilePath $corePath -Certificate $cert -TimestampServer 'http://timestamp.digicert.com'
-if ($sig.Status -ne 'Valid') { throw "Подпись ядра: $($sig.Status)" }
-Write-Info 'Ядро переподписано (Valid)'
+$commitDone = $false
+try {
+    Write-Step 'Переподписываю ядро с новой версией'
+    $cert = Get-ChildItem "Cert:\CurrentUser\My\$CertThumbprint" -ErrorAction SilentlyContinue
+    if (-not $cert) { throw "Сертификат $CertThumbprint не найден в Cert:\CurrentUser\My" }
+    $sig = Set-AuthenticodeSignature -FilePath $corePath -Certificate $cert -TimestampServer 'http://timestamp.digicert.com'
+    if ($sig.Status -ne 'Valid') { throw "Подпись ядра: $($sig.Status)" }
+    Write-Info 'Ядро переподписано (Valid)'
 
-Write-Step 'Коммит, тег, пуш'
-$body = @($commits | ForEach-Object { ($_ -split "`t", 2)[0] }) -join "`n"
-$msgFile = Join-Path $env:TEMP ('release-msg-{0}.txt' -f [guid]::NewGuid().ToString('N'))
-[System.IO.File]::WriteAllText($msgFile, "Bump to $Version`n`n$body`n", $Utf8NoBom)
-Invoke-Git @('add', 'LDManager.core.ps1', "RELEASE_NOTES_$tag.md") | Out-Null
-Invoke-Git @('commit', '-F', $msgFile) | Out-Null
-Remove-Item -LiteralPath $msgFile -Force
-Invoke-Git @('tag', $tag) | Out-Null
-Invoke-Git @('push', 'origin', 'main') | Out-Null
-Invoke-Git @('push', 'origin', $tag) | Out-Null
-Write-Info "Запушены main и тег $tag"
+    Write-Step 'Коммит, тег, пуш'
+    $body = @($commits | ForEach-Object { ($_ -split "`t", 2)[0] }) -join "`n"
+    $msgFile = Join-Path $env:TEMP ('release-msg-{0}.txt' -f [guid]::NewGuid().ToString('N'))
+    [System.IO.File]::WriteAllText($msgFile, "Bump to $Version`n`n$body`n", $Utf8NoBom)
+    Invoke-Git @('add', 'LDManager.core.ps1', "RELEASE_NOTES_$tag.md") | Out-Null
+    Invoke-Git @('commit', '-F', $msgFile) | Out-Null
+    $commitDone = $true
+    Remove-Item -LiteralPath $msgFile -Force
+    Invoke-Git @('tag', $tag) | Out-Null
+    Invoke-Git @('push', 'origin', 'main') | Out-Null
+    Invoke-Git @('push', 'origin', $tag) | Out-Null
+    Write-Info "Запушены main и тег $tag"
+} catch {
+    # Откат имеет смысл только ДО коммита: после него изменения уже в истории,
+    # и восстановление файлов создало бы новые незакоммиченные правки.
+    if (-not $commitDone) {
+        [System.IO.File]::WriteAllText($corePath, $core, $Utf8Bom)
+        if (Test-Path -LiteralPath $notesFile) { Remove-Item -LiteralPath $notesFile -Force }
+        Write-Warning ("Откат: версия {0} возвращена в ядро, {1} удалён." -f $current, (Split-Path -Leaf $notesFile))
+    }
+    if ($msgFile -and (Test-Path -LiteralPath $msgFile)) { Remove-Item -LiteralPath $msgFile -Force }
+    throw
+}
 
 # --- 6. Ждём Release workflow ---------------------------------------------------
 $releaseUrl = "https://github.com/$owner/$repo/releases/tag/$tag"

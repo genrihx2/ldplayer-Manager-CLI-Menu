@@ -212,6 +212,38 @@ function Save-ManagerConfig {
 # ---------------------------------------------------------------------------
 # Поиск ldconsole.exe / adb.exe
 # ---------------------------------------------------------------------------
+function Get-LDEmulatorDirs {
+    # Папки возможной установки LDPlayer ищутся обходом каталогов, а не сверкой
+    # с фиксированным списком имён версий: сборки раскладывают файлы по-разному
+    # (LDPlayer14, LDPlayer9, просто LDPlayer, вложенная папка версии внутри),
+    # поэтому проверяем любые подпапки типовых корней — есть ли в них ldconsole.exe.
+    $dirs = New-Object System.Collections.Generic.List[string]
+    foreach ($drive in @('C','D','E','F','G')) {
+        if (-not (Test-Path -LiteralPath "${drive}:\")) { continue }
+
+        $roots = @(("${drive}:\LDPlayer"))
+        foreach ($pf in @("${drive}:\Program Files", "${drive}:\Program Files (x86)")) {
+            if (-not (Test-Path -LiteralPath $pf)) { continue }
+            foreach ($d in @(Get-ChildItem -LiteralPath $pf -Directory -ErrorAction SilentlyContinue |
+                             Where-Object { $_.Name -match 'LDPlayer|Leidian|dnplayer' })) {
+                $roots += $d.FullName
+            }
+        }
+
+        foreach ($root in $roots) {
+            if (-not (Test-Path -LiteralPath $root)) { continue }
+            if (Test-Path -LiteralPath (Join-Path $root 'ldconsole.exe')) { $dirs.Add($root) }
+            foreach ($d in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
+                if (Test-Path -LiteralPath (Join-Path $d.FullName 'ldconsole.exe')) { $dirs.Add($d.FullName) }
+                foreach ($dd in @(Get-ChildItem -LiteralPath $d.FullName -Directory -ErrorAction SilentlyContinue)) {
+                    if (Test-Path -LiteralPath (Join-Path $dd.FullName 'ldconsole.exe')) { $dirs.Add($dd.FullName) }
+                }
+            }
+        }
+    }
+    return $dirs
+}
+
 function Resolve-LDConsolePath {
     $cfg = Get-AppConfig
     if ($cfg -and $cfg.ldconsolePath -and (Test-Path $cfg.ldconsolePath)) {
@@ -262,10 +294,13 @@ function Resolve-LDConsolePath {
         }
     } catch { }
 
-    # 3) типичные пути установки (включая C:\LDPlayer\LDPlayer14)
+    # 3) любая найденная папка с ldconsole.exe — путь не зашит под имена версий
+    foreach ($d in (Get-LDEmulatorDirs)) { $candidates.Add((Join-Path $d 'ldconsole.exe')) }
+
+    # 4) типичные пути установки (включая C:\LDPlayer\LDPlayer14)
     foreach ($drive in @('C','D','E','F','G')) {
         foreach ($sub in @(
-            'LDPlayer\LDPlayer14','LDPlayer\LDPlayer9','LDPlayer\LDPlayer4',
+            'LDPlayer\LDPlayer','LDPlayer\LDPlayer14','LDPlayer\LDPlayer9','LDPlayer\LDPlayer4',
             'LDPlayer\LDPlayer64','LDPlayer\dnplayer2',
             'Program Files\LDPlayer\LDPlayer14','Program Files\LDPlayer\LDPlayer9',
             'Program Files (x86)\LDPlayer\LDPlayer9','Program Files\LDPlayer'
@@ -288,10 +323,12 @@ function Get-AdbExePath {
         $ldDir = Split-Path $script:LdPath -Parent
         $candidates.Add((Join-Path $ldDir 'adb.exe'))
     }
+    # папки, найденные обходом каталогов (любая версия LDPlayer)
+    foreach ($d in (Get-LDEmulatorDirs)) { $candidates.Add((Join-Path $d 'adb.exe')) }
     # известные пути (включая C:\LDPlayer\LDPlayer14\adb.exe)
     foreach ($drive in @('C','D','E','F','G')) {
         foreach ($sub in @(
-            'LDPlayer\LDPlayer14\adb.exe','LDPlayer\LDPlayer9\adb.exe','LDPlayer\LDPlayer4\adb.exe'
+            'LDPlayer\LDPlayer\adb.exe','LDPlayer\LDPlayer14\adb.exe','LDPlayer\LDPlayer9\adb.exe','LDPlayer\LDPlayer4\adb.exe'
         )) {
             $candidates.Add("${drive}:\$sub")
         }
@@ -2241,6 +2278,51 @@ function Show-BackupMenu {
 # ===========================================================================
 # Настройки (пути)
 # ===========================================================================
+function Select-LDInstallation {
+    # Активная установка LDPlayer: какую копию использует менеджер. Список берётся
+    # автопоиском по папкам, поэтому видны любые версии и раскладки (LDPlayer 9,
+    # LDPlayer 14, портативные сборки), а не только та, что записана в конфиге.
+    $dirs = @(Get-LDEmulatorDirs | Sort-Object -Unique)
+    if ($dirs.Count -eq 0) {
+        Write-Note 'Установки LDPlayer не найдены — укажите путь к ldconsole.exe вручную (пункт [1]).'
+        return
+    }
+
+    $activeDir = if ($script:LdPath) { Split-Path $script:LdPath -Parent } else { $null }
+    Write-Title 'Установки LDPlayer (выбор активной)'
+    for ($i = 0; $i -lt $dirs.Count; $i++) {
+        $d = $dirs[$i]
+        $mark = if ($activeDir -and ($d -ieq $activeDir)) { '  <- активная' } else { '' }
+        $adbMark = if (Test-Path -LiteralPath (Join-Path $d 'adb.exe')) { 'adb есть' } else { 'adb нет' }
+        Write-Host ("  [{0}] {1}  ({2}){3}" -f ($i + 1), $d, $adbMark, $mark)
+    }
+    Write-Host ''
+
+    $raw = (Read-Host 'Номер установки (Enter - отмена)').Trim()
+    if (-not $raw) { return }
+
+    $n = 0
+    if (-not [int]::TryParse($raw, [ref]$n) -or $n -lt 1 -or $n -gt $dirs.Count) {
+        Write-Fail 'Неверный номер.'
+        return
+    }
+
+    $target = Join-Path $dirs[$n - 1] 'ldconsole.exe'
+    if (-not (Test-Path -LiteralPath $target)) {
+        Write-Fail "ldconsole.exe не найден: $target"
+        return
+    }
+
+    $script:LdPath = $target
+    $script:AdbPath = $null
+    $adb = Get-AdbExePath
+    if ($adb) { Save-ManagerConfig -LdConsolePath $target -AdbPath $adb }
+    else     { Save-ManagerConfig -LdConsolePath $target }
+
+    Write-Ok "Активная установка: $(Split-Path $target -Parent)"
+    if ($adb) { Write-Note "adb: $adb" } else { Write-Note 'adb.exe рядом не найден — будет искаться автоматически.' }
+}
+
 function Show-SettingsMenu {
     while ($true) {
         Show-Banner
@@ -2258,6 +2340,7 @@ function Show-SettingsMenu {
         Write-Host '  [2] Повторить автопоиск ldconsole.exe'
         Write-Host '  [3] Указать путь к adb.exe вручную'
         Write-Host '  [4] Сбросить конфигурацию'
+        Write-Host '  [5] Установки LDPlayer - выбор активной (LDPlayer 9 / 14 / другая)'
         Write-Host ''
         Write-Host '  [0] Назад'
         $c = (Read-Host 'Выбор').Trim()
@@ -2293,6 +2376,7 @@ function Show-SettingsMenu {
                 } else { Write-Fail 'Файл не найден.' }
                 Wait-Enter
             }
+            '5' { Select-LDInstallation; Wait-Enter }
             '4' {
                 if (Confirm-Action 'Удалить файл конфигурации?') {
                     if (Test-Path $script:ConfigPath) { Remove-Item $script:ConfigPath -Force }
