@@ -842,3 +842,37 @@ Describe 'Состояние производительности: чтение 
         $s.Resolution | Should -BeNullOrEmpty
     }
 }
+Describe 'Рекомендация RAM: как в окне LDPlayer' {
+    It 'для 6 ядер на мощной машине предлагает 6144, а не половину RAM хоста' {
+        # Регресс: подсказка брала половину памяти машины и на 32 ГБ советовала
+        # 8192 МБ — такого варианта «Рекомендуется» в окне LDPlayer нет.
+        (Get-LDRecommendedRam -Cpu 6 -HostRamMb 32692) | Should -Be 6144
+        (Get-LDRecommendedRam -Cpu 6 -HostRamMb 65536) | Should -Be 6144
+    }
+
+    It 'масштабируется по числу ядер: 1 -> 1024, 2 -> 2048, 4 -> 4096' {
+        (Get-LDRecommendedRam -Cpu 1 -HostRamMb 16384) | Should -Be 1024
+        (Get-LDRecommendedRam -Cpu 2 -HostRamMb 16384) | Should -Be 2048
+        (Get-LDRecommendedRam -Cpu 4 -HostRamMb 16384) | Should -Be 4096
+    }
+
+    It 'не превышает половину памяти машины' {
+        (Get-LDRecommendedRam -Cpu 6 -HostRamMb 8192)  | Should -Be 4096
+        (Get-LDRecommendedRam -Cpu 6 -HostRamMb 4096)  | Should -Be 2048
+        (Get-LDRecommendedRam -Cpu 6 -HostRamMb 1024)  | Should -Be 512
+    }
+
+    It 'без данных о памяти машины берёт безопасный профиль' {
+        (Get-LDRecommendedRam -Cpu 6 -HostRamMb 0) | Should -Be 4096
+    }
+
+    It 'всегда возвращает значение из списка допустимых для ldconsole' {
+        $allowed = @(256, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192)
+        foreach ($cpu in @(1, 2, 3, 4, 5, 6)) {
+            foreach ($ram in @(0, 1024, 4096, 8192, 16384, 32768)) {
+                $v = Get-LDRecommendedRam -Cpu $cpu -HostRamMb $ram
+                ($allowed -contains $v) | Should -BeTrue
+            }
+        }
+    }
+}

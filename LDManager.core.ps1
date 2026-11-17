@@ -54,6 +54,9 @@ $script:RepoName    = 'ldplayer-Manager-CLI-Menu'
 $script:RepoBranch  = 'main'
 $script:UpdateNotice = $null
 
+# Допустимые объёмы RAM для ldconsole и для меню CPU/RAM — один список на весь скрипт.
+$script:RamOptions = @(256, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192)
+
 $scriptRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $script:ConfigPath = Join-Path $scriptRoot 'LDManager.config.json'
 $script:LdPath  = $null
@@ -1242,7 +1245,7 @@ function Set-LDCpuRam {
     # LDPlayer сам предлагает до 6 ядер и объёмы RAM с шагом 3072/6144 МБ —
     # меню не должно резать список уже, чем окно эмулятора.
     $maxCpu  = [math]::Max(1, [math]::Min(6, $machine.Cores))
-    $ramValues = @(256, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192)
+    $ramValues = $script:RamOptions
     $curCpu = if ($state.Cpu) { [string]$state.Cpu } else { 'н/д' }
     $curRam = if ($state.RamMb) { [string]$state.RamMb } else { 'н/д' }
     $ramHint = ($ramValues -join ', ')
@@ -1253,10 +1256,8 @@ function Set-LDCpuRam {
     Write-Host ''
 
     # Подсказка «как в окне LDPlayer»: там отмечено рекомендуемое значение.
-    $halfRam = if ($machine.RamMb) { [int]($machine.RamMb / 2) } else { 4096 }
-    $recRam = 1024
-    foreach ($r in $ramValues) { if ($r -le $halfRam) { $recRam = $r } }
-    Write-Host ("  Ориентир: ядер {0}, RAM {1} МБ (не больше половины памяти машины)" -f $maxCpu, $recRam) -ForegroundColor DarkGray
+    $recRam = Get-LDRecommendedRam -Cpu $maxCpu -HostRamMb $machine.RamMb
+    Write-Host ("  Ориентир: ядер {0}, RAM {1} МБ (рекомендация LDPlayer; не больше половины памяти машины)" -f $maxCpu, $recRam) -ForegroundColor DarkGray
     Write-Host ''
     $cpu = (Read-Host ("  Ядер CPU (1-{0}, Enter - оставить {1})" -f $maxCpu, $curCpu)).Trim()
     Write-Host ("  Допустимая RAM (МБ): {0}" -f $ramHint)
@@ -1363,8 +1364,7 @@ function Get-LDPerformancePreset {
 
     $maxCpu = [math]::Max(1, [math]::Min(6, $HostCores))
     $half = if ($HostRamMb -gt 0) { [int]($HostRamMb / 2) } else { 4096 }
-    $maxRam = 1024
-    foreach ($r in @(1024, 2048, 3072, 4096, 6144, 8192)) { if ($r -le $half) { $maxRam = $r } }
+    $maxRam = Select-RamMb -Options @(1024, 2048, 3072, 4096, 6144, 8192) -LimitMb $half
 
     return @(
         [pscustomobject]@{ Key = '1'; Name = 'Экономный';        Cpu = 1;                      RamMb = [math]::Min(1024, $maxRam); Resolution = '960,540,240';   Note = 'слабые машины и много инстансов' }
@@ -1372,6 +1372,26 @@ function Get-LDPerformancePreset {
         [pscustomobject]@{ Key = '3'; Name = 'Производительный'; Cpu = [math]::Min(3, $maxCpu); RamMb = [math]::Min(4096, $maxRam); Resolution = '1600,900,280';  Note = 'игры и тяжёлые приложения' }
         [pscustomobject]@{ Key = '4'; Name = 'Максимальный';     Cpu = $maxCpu;                RamMb = $maxRam;                    Resolution = '1920,1080,480'; Note = 'один инстанс на всю машину' }
     )
+}
+
+function Select-RamMb {
+    # Наибольшее значение из списка, которое не превышает предел.
+    param([int[]]$Options, [int]$LimitMb)
+
+    $fit = @($Options | Where-Object { $_ -le $LimitMb })
+    if ($fit.Count -eq 0) { return [int](($Options | Measure-Object -Minimum).Minimum) }
+    return [int]$fit[$fit.Count - 1]
+}
+
+function Get-LDRecommendedRam {
+    # «Ориентир» как в окне LDPlayer: ~1 ГБ на ядро (не выше 6 ядер) и не больше
+    # половины памяти машины. Раньше брали просто половину RAM хоста и на 32 ГБ
+    # советовали 8192 МБ — больше, чем помечает эмулятор.
+    param([int]$Cpu = 6, [int]$HostRamMb = 0)
+
+    $cores = [math]::Min([math]::Max($Cpu, 1), 6)
+    $half  = if ($HostRamMb -gt 0) { [int]($HostRamMb / 2) } else { 4096 }
+    return (Select-RamMb -Options $script:RamOptions -LimitMb ([math]::Min($cores * 1024, $half)))
 }
 
 function Get-LDPerformanceState {
